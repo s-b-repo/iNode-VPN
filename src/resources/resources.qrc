@@ -1,0 +1,12 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+    <qresource prefix="/icons">
+        <file alias="app.svg">org.inode.ClientQt.svg</file>
+    </qresource>
+    <qresource prefix="/themes">
+        <file alias="areo.qss">themes/areo.qss</file>
+        <file alias="brightness.qss">themes/brightness.qss</file>
+        <file alias="star.qss">themes/star.qss</file>
+        <file alias="mullvad.qss">themes/mullvad.qss</file>
+    </qresource>
+</RCC>

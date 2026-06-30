@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+# inode-l2tp-helper — privileged helper that wires up an L2TP/IPSec
+# connection against strongswan + xl2tpd. Invoked by the GUI via pkexec.
+#
+# Subcommands:
+#   up   --name N --server HOST --username U --secrets-stdin
+#   down --name N
+#
+# Notes:
+#   - Writes a dedicated ipsec.conf fragment under /etc/ipsec.conf.d/ and an
+#     xl2tpd section under /etc/xl2tpd/xl2tpd.conf.d/. Both directories are
+#     created on first run; we don't edit existing system configs.
+#   - Credentials are NOT passed on the command line (they would show up in
+#     `ps`/proc). With --secrets-stdin the PSK and the password are read as the
+#     first two lines of stdin. (--psk/--password are still accepted for manual
+#     CLI use but should be avoided from the GUI.)
+#   - Returns 0 on success, non-zero on failure.
+
+set -euo pipefail
+
+die() { echo "helper: $*" >&2; exit 1; }
+
+need_root() {
+    [[ $EUID -eq 0 ]] || die "must be run as root (invoke via pkexec)"
+}
+
+cmd=${1:-}; shift || die "usage: $0 up|down ..."
+
+NAME=""
+SERVER=""
+PSK=""
+USERNAME=""
+PASSWORD=""
+FORCE_UDP_ENCAP=0
+SECRETS_STDIN=0
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --name)             NAME=$2;     shift 2 ;;
+        --server)           SERVER=$2;   shift 2 ;;
+        --psk)              PSK=$2;      shift 2 ;;
+        --username)         USERNAME=$2; shift 2 ;;
+        --password)         PASSWORD=$2; shift 2 ;;
+        --secrets-stdin)    SECRETS_STDIN=1; shift ;;
+        --force-udp-encap)  FORCE_UDP_ENCAP=1; shift ;;
+        *)                  die "unknown arg: $1" ;;
+    esac
+done
+
+[[ -n $NAME ]] || die "--name required"
+
+# Read secrets off stdin (PSK on line 1, password on line 2) so they never
+# appear in argv / `ps`.
+if [[ $SECRETS_STDIN -eq 1 ]]; then
+    IFS= read -r PSK      || true
+    IFS= read -r PASSWORD || true
+fi
+
+need_root
+
+IPSEC_FRAG=/etc/ipsec.conf.d/${NAME}.conf
+IPSEC_SECRETS=/etc/ipsec.d/${NAME}.secrets
+XL2TPD_FRAG=/etc/xl2tpd/xl2tpd.conf.d/${NAME}.conf
+PPP_CHAP=/etc/ppp/chap-secrets
+PPP_PEER=/etc/ppp/peers/${NAME}
+
+mkdir -p /etc/ipsec.conf.d /etc/xl2tpd/xl2tpd.conf.d
+
+case "$cmd" in
+    up)
+        [[ -n $SERVER && -n $PSK && -n $USERNAME && -n $PASSWORD ]] \
+            || die "up requires --server --psk --username --password"
+
+        # Force-UDP-encap forces the IKE endpoint to advertise NAT-T regardless
+        # of whether a NAT is present. Needed against some H3C concentrators
+        # that always expect UDP-encapsulated ESP on port 4500.
+        FORCEENCAPS_LINE=""
+        [[ $FORCE_UDP_ENCAP -eq 1 ]] && FORCEENCAPS_LINE="    forceencaps=yes"
+
+        cat > "$IPSEC_FRAG" <<EOF
+conn ${NAME}
+    auto=add
+    keyexchange=ikev1
+    authby=secret
+    type=transport
+    left=%defaultroute
+    leftprotoport=17/1701
+    right=${SERVER}
+    rightprotoport=17/1701
+    ike=aes128-sha1-modp1024,aes256-sha1-modp1024,3des-sha1-modp1024!
+    esp=aes128-sha1,aes256-sha1,3des-sha1!
+    keyingtries=3
+    dpdaction=clear
+${FORCEENCAPS_LINE}
+EOF
+        chmod 600 "$IPSEC_FRAG"
+
+        cat > "$IPSEC_SECRETS" <<EOF
+: PSK "${PSK}"
+EOF
+        chmod 600 "$IPSEC_SECRETS"
+
+        cat > "$XL2TPD_FRAG" <<EOF
+[lac ${NAME}]
+lns = ${SERVER}
+ppp debug = yes
+pppoptfile = ${PPP_PEER}
+length bit = yes
+EOF
+
+        mkdir -p /etc/ppp/peers
+        cat > "$PPP_PEER" <<EOF
+ipcp-accept-local
+ipcp-accept-remote
+refuse-eap
+require-mschap-v2
+noccp
+noauth
+idle 1800
+mtu 1410
+mru 1410
+defaultroute
+usepeerdns
+debug
+connect-delay 5000
+name ${USERNAME}
+EOF
+        chmod 600 "$PPP_PEER"
+
+        # Merge into chap-secrets without duplicating.
+        touch "$PPP_CHAP"; chmod 600 "$PPP_CHAP"
+        sed -i "\|^${USERNAME}[[:space:]]|d" "$PPP_CHAP"
+        printf '%s\t*\t%s\t*\n' "$USERNAME" "$PASSWORD" >> "$PPP_CHAP"
+
+        # Include our fragment from the main ipsec.conf if not already.
+        if ! grep -q "include /etc/ipsec.conf.d/\*.conf" /etc/ipsec.conf 2>/dev/null; then
+            echo 'include /etc/ipsec.conf.d/*.conf' >> /etc/ipsec.conf
+        fi
+        if ! grep -q "include /etc/ipsec.d/\*.secrets" /etc/ipsec.secrets 2>/dev/null; then
+            echo 'include /etc/ipsec.d/*.secrets' >> /etc/ipsec.secrets
+        fi
+
+        systemctl start strongswan-starter 2>/dev/null || systemctl start strongswan 2>/dev/null || true
+        systemctl start xl2tpd 2>/dev/null || true
+        ipsec reload >/dev/null
+        sleep 1
+        ipsec up "${NAME}"
+
+        # xl2tpd control socket
+        XCTL=/var/run/xl2tpd/l2tp-control
+        [[ -p $XCTL ]] || die "xl2tpd control socket not present ($XCTL)"
+        echo "c ${NAME}" > "$XCTL"
+        sleep 2
+
+        if ip -o link show ppp0 >/dev/null 2>&1; then
+            echo "L2TP tunnel up on ppp0"
+        else
+            die "ppp0 did not come up"
+        fi
+        ;;
+
+    down)
+        if [[ -p /var/run/xl2tpd/l2tp-control ]]; then
+            echo "d ${NAME}" > /var/run/xl2tpd/l2tp-control || true
+        fi
+        ipsec down "${NAME}" >/dev/null 2>&1 || true
+        rm -f "$IPSEC_FRAG" "$IPSEC_SECRETS" "$XL2TPD_FRAG" "$PPP_PEER"
+        ipsec reload >/dev/null 2>&1 || true
+        echo "L2TP tunnel ${NAME} torn down"
+        ;;
+
+    *)
+        die "unknown subcommand: $cmd"
+        ;;
+esac

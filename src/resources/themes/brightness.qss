@@ -1,0 +1,63 @@
+/* "Brightness" — a cleaner, flatter light theme. */
+
+QMainWindow, QDialog {
+    background: #f7f7f8;
+    color: #1a1a1a;
+}
+
+QMenuBar {
+    background: #f0f0f0;
+    color: #1a1a1a;
+    border-bottom: 1px solid #dcdcdc;
+}
+
+QMenuBar::item:selected { background: #d7e8ff; }
+
+QStatusBar {
+    background: #f0f0f0;
+    color: #1a1a1a;
+    border-top: 1px solid #dcdcdc;
+}
+
+QListWidget {
+    background: #ffffff;
+    alternate-background-color: #f4f4f4;
+    border: 1px solid #c8c8c8;
+    selection-background-color: #2681ff;
+    selection-color: #ffffff;
+}
+
+QPushButton {
+    background: #ffffff;
+    color: #1a1a1a;
+    border: 1px solid #c8c8c8;
+    border-radius: 3px;
+    padding: 6px 14px;
+}
+
+QPushButton:hover { background: #eef5ff; border-color: #7aa7e2; }
+QPushButton:pressed { background: #d7e8ff; }
+QPushButton:disabled { color: #9a9a9a; background: #f4f4f4; }
+
+QLineEdit, QSpinBox, QComboBox {
+    background: #ffffff;
+    border: 1px solid #c8c8c8;
+    border-radius: 3px;
+    padding: 4px 6px;
+    selection-background-color: #2681ff;
+}
+
+QPlainTextEdit {
+    background: #ffffff;
+    border: 1px solid #c8c8c8;
+    color: #1a1a1a;
+}
+
+QTabWidget::pane { border: 1px solid #c8c8c8; background: #ffffff; }
+QTabBar::tab {
+    background: #f0f0f0;
+    padding: 6px 14px;
+    border: 1px solid #c8c8c8;
+    border-bottom: none;
+}
+QTabBar::tab:selected { background: #ffffff; }

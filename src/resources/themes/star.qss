@@ -1,0 +1,78 @@
+/* "Star" — dark theme with the blue accent used in the original client. */
+
+QMainWindow, QDialog {
+    background: #1e2228;
+    color: #e6e8ea;
+}
+
+QMenuBar {
+    background: #161a1f;
+    color: #e6e8ea;
+    border-bottom: 1px solid #2b313a;
+}
+
+QMenuBar::item:selected { background: #2e70c5; color: #ffffff; }
+
+QMenu {
+    background: #1e2228;
+    color: #e6e8ea;
+    border: 1px solid #2b313a;
+}
+
+QMenu::item:selected { background: #2e70c5; color: #ffffff; }
+
+QStatusBar {
+    background: #161a1f;
+    color: #e6e8ea;
+    border-top: 1px solid #2b313a;
+}
+
+QListWidget {
+    background: #24292f;
+    alternate-background-color: #1c2026;
+    border: 1px solid #2b313a;
+    color: #e6e8ea;
+    selection-background-color: #2e70c5;
+    selection-color: #ffffff;
+}
+
+QPushButton {
+    background: #2a303a;
+    color: #e6e8ea;
+    border: 1px solid #3b4352;
+    border-radius: 4px;
+    padding: 6px 14px;
+}
+
+QPushButton:hover { background: #343c49; border-color: #4a556a; }
+QPushButton:pressed { background: #2e70c5; color: #ffffff; }
+QPushButton:disabled { color: #6c7380; background: #21262d; border-color: #2b313a; }
+
+QLineEdit, QSpinBox, QComboBox {
+    background: #161a1f;
+    color: #e6e8ea;
+    border: 1px solid #3b4352;
+    border-radius: 3px;
+    padding: 4px 6px;
+    selection-background-color: #2e70c5;
+}
+
+QPlainTextEdit {
+    background: #0f1115;
+    color: #d5dce3;
+    border: 1px solid #2b313a;
+}
+
+QTabWidget::pane { border: 1px solid #2b313a; background: #1e2228; }
+QTabBar::tab {
+    background: #161a1f;
+    color: #c3c8cd;
+    padding: 6px 14px;
+    border: 1px solid #2b313a;
+    border-bottom: none;
+}
+QTabBar::tab:selected { background: #1e2228; color: #ffffff; }
+
+QLabel { color: #e6e8ea; }
+QCheckBox, QRadioButton { color: #e6e8ea; }
+QToolTip { background: #161a1f; color: #e6e8ea; border: 1px solid #3b4352; }

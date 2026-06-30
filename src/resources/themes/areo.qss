@@ -1,0 +1,79 @@
+/* "Aero" — Windows-7-flavoured gradient-heavy theme. */
+
+QMainWindow, QDialog {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #d0e4ff, stop:1 #f5faff);
+    color: #202830;
+}
+
+QMenuBar {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #e6f1ff, stop:1 #c4daf5);
+    color: #202830;
+    border-bottom: 1px solid #8aaad0;
+}
+
+QMenuBar::item:selected { background: #8fb7e3; }
+
+QStatusBar {
+    background: #d8e7fb;
+    color: #202830;
+    border-top: 1px solid #8aaad0;
+}
+
+QListWidget {
+    background: #ffffff;
+    alternate-background-color: #eaf2fb;
+    border: 1px solid #93b4da;
+    selection-background-color: #3d7ac3;
+    selection-color: #ffffff;
+}
+
+QPushButton {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #ffffff, stop:1 #c9ddf7);
+    color: #102030;
+    border: 1px solid #7a9ec7;
+    border-radius: 4px;
+    padding: 5px 12px;
+}
+
+QPushButton:hover {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #ffffff, stop:1 #b4cff0);
+}
+
+QPushButton:pressed {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #b4cff0, stop:1 #96bbeb);
+}
+
+QPushButton:disabled {
+    background: #eef3f9;
+    color: #96a8bb;
+    border: 1px solid #c7d5e6;
+}
+
+QLineEdit, QSpinBox, QComboBox {
+    background: #ffffff;
+    border: 1px solid #7a9ec7;
+    border-radius: 3px;
+    padding: 3px 6px;
+    selection-background-color: #3d7ac3;
+}
+
+QPlainTextEdit {
+    background: #f7fbff;
+    border: 1px solid #9ab8df;
+    color: #15242f;
+}
+
+QTabWidget::pane { border: 1px solid #7a9ec7; }
+QTabBar::tab {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #e6f1ff, stop:1 #c4daf5);
+    padding: 6px 14px;
+    border: 1px solid #7a9ec7;
+    border-bottom: none;
+}
+QTabBar::tab:selected { background: #ffffff; }

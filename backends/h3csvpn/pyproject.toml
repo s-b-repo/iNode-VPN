@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "h3c-svpn"
+version = "0.1.0"
+description = "Open-source, clean-room interoperable client for the H3C iNode SSL VPN protocol"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "h3c-svpn contributors" }]
+keywords = ["vpn", "h3c", "inode", "sslvpn", "interoperability"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Internet",
+    "Topic :: System :: Networking",
+]
+dependencies = []          # core client is pure stdlib
+
+[project.optional-dependencies]
+# Hardened XML (recommended) + RSA password variant + test runner.
+secure = ["defusedxml>=0.7"]
+rsa = ["cryptography>=3.4"]
+test = ["pytest>=7", "defusedxml>=0.7", "cryptography>=3.4"]
+
+[project.scripts]
+h3c-svpn = "h3csvpn.cli:main"
+
+[project.urls]
+Documentation = "./docs/PROTOCOL.md"
+
+[tool.setuptools]
+packages = ["h3csvpn"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+    <vendor>iNode Client Qt</vendor>
+    <vendor_url>https://example.invalid/inode-client-qt</vendor_url>
+
+    <action id="org.inode.ClientQt.l2tp">
+        <description>Bring an L2TP/IPSec tunnel up or down</description>
+        <message>Authentication is required to manage the iNode L2TP/IPSec tunnel</message>
+        <defaults>
+            <allow_any>auth_admin_keep</allow_any>
+            <allow_inactive>auth_admin_keep</allow_inactive>
+            <allow_active>auth_admin_keep</allow_active>
+        </defaults>
+        <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/iNodeClient-Qt/inode-l2tp-helper</annotate>
+    </action>
+
+    <action id="org.inode.ClientQt.dot1x">
+        <description>Run an 802.1X supplicant (minieap/mentohust)</description>
+        <message>Authentication is required to run the 802.1X supplicant</message>
+        <defaults>
+            <allow_any>auth_admin_keep</allow_any>
+            <allow_inactive>auth_admin_keep</allow_inactive>
+            <allow_active>auth_admin_keep</allow_active>
+        </defaults>
+        <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/iNodeClient-Qt/inode-dot1x-helper</annotate>
+    </action>
+
+    <action id="org.inode.ClientQt.svpn">
+        <description>Bring an H3C SSL VPN tunnel up or down</description>
+        <message>Authentication is required to manage the iNode SSL VPN tunnel</message>
+        <defaults>
+            <allow_any>auth_admin_keep</allow_any>
+            <allow_inactive>auth_admin_keep</allow_inactive>
+            <allow_active>auth_admin_keep</allow_active>
+        </defaults>
+        <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/iNodeClient-Qt/inode-svpn-helper</annotate>
+    </action>
+
+    <action id="org.inode.ClientQt.ipcfg">
+        <description>Apply a static IP configuration to a network interface</description>
+        <message>Authentication is required to set the iNode static IP configuration</message>
+        <defaults>
+            <allow_any>auth_admin_keep</allow_any>
+            <allow_inactive>auth_admin_keep</allow_inactive>
+            <allow_active>auth_admin_keep</allow_active>
+        </defaults>
+        <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/iNodeClient-Qt/inode-ipcfg-helper</annotate>
+    </action>
+</policyconfig>

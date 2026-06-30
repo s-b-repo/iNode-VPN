@@ -1,0 +1,5 @@
+# The core client (h3csvpn) is pure Python stdlib and needs nothing here.
+# These are recommended for security hardening, the optional RSA mode, and tests.
+defusedxml>=0.7      # hardened XML parsing of untrusted gateway responses
+cryptography>=3.4    # optional RSA password mode + mock-gateway self-signed cert
+pytest>=7            # test runner

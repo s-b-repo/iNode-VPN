@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# inode-dot1x-helper — tiny wrapper around minieap/mentohust that can be
+# allow-listed in polkit. The GUI invokes this via pkexec.
+
+set -euo pipefail
+
+if command -v minieap >/dev/null 2>&1; then
+    exec minieap "$@"
+elif command -v mentohust >/dev/null 2>&1; then
+    exec mentohust "$@"
+else
+    echo "Neither minieap nor mentohust is installed." >&2
+    exit 127
+fi

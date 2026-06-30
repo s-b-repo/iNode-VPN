@@ -1,0 +1,70 @@
+# Build artifacts
+build/
+*.o
+*.obj
+*.exe
+*.out
+*.app
+moc_*.cpp
+qrc_*.cpp
+ui_*.h
+*_autogen/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+*.egg
+.eggs/
+*.whl
+venv/
+.venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Binary artifacts (no binaries in repo)
+bin/iNodeClient-Qt
+
+# Secrets / local config
+*.pem
+*.key
+*.pfx
+.env
+*.local
+
+# Logs
+*.log
+logs/
+
+# Package manager
+node_modules/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+!cmake/*.cmake
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Runtime state
+/run/
+*.pid
+
+# Temporary / transient (the packaged runtime tree)
+bin/
+!bin/.gitkeep

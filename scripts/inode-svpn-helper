@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+# inode-svpn-helper — privileged helper that brings up an H3C SSL VPN tunnel
+# using the bundled clean-room backend (python module `h3csvpn`). Invoked by
+# the GUI via pkexec because the tunnel creates a TUN device (CAP_NET_ADMIN)
+# and programs routes/DNS.
+#
+# It mirrors inode-l2tp-helper's up/down split, but because an SSL VPN tunnel
+# is a long-lived userspace pump (not a one-shot config write), the `connect`
+# subcommand stays in the FOREGROUND for the life of the tunnel; the GUI tears
+# it down with a separate `stop` invocation.
+#
+# Subcommands:
+#   connect --name N --backend DIR [--with-password] -- <h3csvpn argv...>
+#       Runs `python3 -m h3csvpn <argv...>` with PYTHONPATH=DIR. The trailing
+#       argv after `--` is the backend command line built by the GUI (gateway,
+#       -u, -d, TLS flags, --auto-captcha, -v, ...). If --with-password is set,
+#       one line is read from stdin and exported as H3C_SVPN_PASSWORD so the
+#       password never appears in argv / `ps`. The backend PID is recorded in
+#       /run/inode-svpn/<name>.pid so `stop` can signal it for a clean logout.
+#
+#   stop --name N
+#       Sends SIGINT to the recorded backend PID (graceful: backend runs its
+#       logout + TUN teardown in a finally block), escalating to SIGKILL.
+#
+# Returns 0 on success, non-zero on failure. Credentials are never persisted.
+
+set -euo pipefail
+
+die() { echo "helper: $*" >&2; exit 1; }
+
+need_root() {
+    [[ ${EUID:-$(id -u)} -eq 0 ]] || die "must be run as root (invoke via pkexec)"
+}
+
+cmd=${1:-}; shift || die "usage: $0 connect|stop ..."
+
+NAME=""
+BACKEND=""
+WITH_PASSWORD=0
+PYARGS=()
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --name)          NAME=$2;     shift 2 ;;
+        --backend)       BACKEND=$2;  shift 2 ;;
+        --with-password) WITH_PASSWORD=1; shift ;;
+        --)              shift; PYARGS=("$@"); break ;;
+        *)               die "unknown arg: $1" ;;
+    esac
+done
+
+[[ -n $NAME ]] || die "--name required"
+# Reject anything that could escape the pidfile path.
+[[ $NAME =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid --name"
+
+need_root
+
+RUNDIR=/run/inode-svpn
+PIDFILE="$RUNDIR/${NAME}.pid"
+mkdir -p "$RUNDIR"
+chmod 700 "$RUNDIR"
+
+PYTHON=$(command -v python3 || command -v python || true)
+[[ -n $PYTHON ]] || die "python3 not found"
+
+case "$cmd" in
+    connect)
+        [[ -n $BACKEND ]] || die "connect requires --backend DIR"
+        # SECURITY: this helper runs as root (pkexec). It will import and execute
+        # python from --backend, so an attacker who can point it at a writable
+        # dir containing a malicious h3csvpn/ would get code execution as root.
+        # Canonicalize and refuse transient/world-writable locations. We cannot
+        # require root ownership (the portable package legitimately runs from the
+        # user's home dir), but we DO refuse any group/other-writable backend so
+        # a malicious module can't be planted or swapped in.
+        BACKEND=$(realpath -e "$BACKEND" 2>/dev/null) || die "backend path does not resolve"
+        case "$BACKEND" in
+            /tmp/*|/var/tmp/*|/dev/shm/*|/run/*|/proc/*)
+                die "refusing backend under a transient/world-writable dir: $BACKEND" ;;
+        esac
+        [[ -f "$BACKEND/h3csvpn/__init__.py" ]] || die "backend not found at $BACKEND"
+        if [[ -n $(find "$BACKEND/h3csvpn" -perm /022 -print -quit 2>/dev/null) ]]; then
+            die "backend is group/other-writable; refusing to load it as root: $BACKEND"
+        fi
+        [[ ${#PYARGS[@]} -gt 0 ]] || die "connect requires -- <h3csvpn argv...>"
+
+        if [[ $WITH_PASSWORD -eq 1 ]]; then
+            IFS= read -r H3C_SVPN_PASSWORD || true
+            export H3C_SVPN_PASSWORD
+        fi
+        export PYTHONPATH="$BACKEND${PYTHONPATH:+:$PYTHONPATH}"
+        export PYTHONUNBUFFERED=1
+        # Lock module resolution to PYTHONPATH: stop python from prepending the
+        # current working directory to sys.path (Python >=3.11), so a stray
+        # 'h3csvpn' in cwd can't shadow the vendored backend. Ignored on older
+        # pythons (harmless).
+        export PYTHONSAFEPATH=1
+        # Don't write __pycache__/*.pyc into the backend tree. Running as root we
+        # could otherwise drop group/other-writable bytecode (depending on the
+        # inherited umask) right back into $BACKEND, which would re-trip the
+        # group/other-writable check above on the next connect.
+        export PYTHONDONTWRITEBYTECODE=1
+
+        # Run the backend in the background so we can record its PID, then
+        # forward terminating signals to it for a graceful logout/teardown.
+        "$PYTHON" -m h3csvpn "${PYARGS[@]}" &
+        PYPID=$!
+        echo "$PYPID" > "$PIDFILE"
+        # shellcheck disable=SC2064
+        trap "kill -INT $PYPID 2>/dev/null || true" TERM INT
+        set +e
+        wait "$PYPID"
+        rc=$?
+        set -e
+        rm -f "$PIDFILE"
+        exit $rc
+        ;;
+
+    stop)
+        if [[ ! -f $PIDFILE ]]; then
+            echo "no active SSL VPN tunnel named ${NAME}"
+            exit 0
+        fi
+        PYPID=$(cat "$PIDFILE" 2>/dev/null || true)
+        if [[ -n $PYPID ]] && kill -0 "$PYPID" 2>/dev/null; then
+            kill -INT "$PYPID" 2>/dev/null || true
+            for _ in $(seq 1 50); do
+                kill -0 "$PYPID" 2>/dev/null || break
+                sleep 0.1
+            done
+            kill -0 "$PYPID" 2>/dev/null && kill -KILL "$PYPID" 2>/dev/null || true
+        fi
+        rm -f "$PIDFILE"
+        echo "SSL VPN tunnel ${NAME} torn down"
+        ;;
+
+    *)
+        die "unknown subcommand: $cmd"
+        ;;
+esac
