@@ -41,7 +41,9 @@ QString defaultGateway(const QString& iface) {
         bool ok = false;
         const quint32 rawGw = parts.at(2).toUInt(&ok, 16);
         if (!ok) continue;
-        int metric = parts.at(6).toInt();
+        bool mok = false;
+        int metric = parts.at(6).toInt(&mok);
+        if (!mok) continue;         // skip routes with broken metric
         if (metric > bestMetric) continue;
         bestMetric = metric;
         // Little-endian — byte-reverse to dotted-quad.

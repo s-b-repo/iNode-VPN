@@ -27,11 +27,10 @@ Dot1xProtocol::~Dot1xProtocol() {
     }
 }
 
-static QStringList minieapArgs(const Profile& profile, const QString& password) {
+static QStringList minieapArgs(const Profile& profile) {
     QStringList args;
     args << QStringLiteral("--nogui")
          << QStringLiteral("-u") << profile.username
-         << QStringLiteral("-p") << password
          << QStringLiteral("-n") << profile.iface
          << QStringLiteral("--auth-round") << QStringLiteral("1")
          << QStringLiteral("--daemonize") << QStringLiteral("0");
@@ -92,7 +91,7 @@ void Dot1xProtocol::connectWith(const Profile& profile) {
     QString bin = QStandardPaths::findExecutable(QStringLiteral("minieap"));
     QStringList args;
     if (!bin.isEmpty()) {
-        args = minieapArgs(profile, m_password);
+        args = minieapArgs(profile);
     } else {
         bin = QStandardPaths::findExecutable(QStringLiteral("mentohust"));
         if (bin.isEmpty()) {
@@ -104,7 +103,6 @@ void Dot1xProtocol::connectWith(const Profile& profile) {
             return;
         }
         args << QStringLiteral("-u") << profile.username
-             << QStringLiteral("-p") << m_password
              << QStringLiteral("-n") << profile.iface
              << QStringLiteral("-w");
         if (profile.heartbeatSec > 0)
@@ -115,6 +113,9 @@ void Dot1xProtocol::connectWith(const Profile& profile) {
 
     QString launcher = bin;
     QStringList finalArgs = args;
+    // Prepend --stdin-password so the helper reads the password from stdin
+    // instead of exposing it in argv/ps.
+    finalArgs.prepend(QStringLiteral("--stdin-password"));
     if (geteuid() != 0) {
         const QString pkexec = QStandardPaths::findExecutable(QStringLiteral("pkexec"));
         if (!pkexec.isEmpty()) {
@@ -126,10 +127,12 @@ void Dot1xProtocol::connectWith(const Profile& profile) {
     Logger::instance().info(
         tr("802.1X: launching %1 on %2 as %3").arg(bin, profile.iface, profile.username));
 
-    startProcess(launcher, finalArgs);
+    startProcess(launcher, finalArgs, m_password.toUtf8());
+    m_password.clear();
 }
 
-void Dot1xProtocol::startProcess(const QString& binary, const QStringList& args) {
+void Dot1xProtocol::startProcess(const QString& binary, const QStringList& args,
+                                  const QByteArray& stdinData) {
     if (m_proc) { m_proc->deleteLater(); m_proc = nullptr; }
 
     m_proc = new QProcess(this);
@@ -144,6 +147,13 @@ void Dot1xProtocol::startProcess(const QString& binary, const QStringList& args)
 
     setState(ConnectionState::Connecting);
     m_proc->start(binary, args);
+
+    // Write password on stdin (never in argv) and close.
+    if (!stdinData.isEmpty()) {
+        m_proc->write(stdinData);
+        m_proc->write("\n");
+        m_proc->closeWriteChannel();
+    }
 }
 
 void Dot1xProtocol::onReadyRead() {

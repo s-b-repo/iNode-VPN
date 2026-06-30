@@ -1,13 +1,34 @@
 #!/usr/bin/env bash
 # inode-dot1x-helper — tiny wrapper around minieap/mentohust that can be
 # allow-listed in polkit. The GUI invokes this via pkexec.
+#
+# If a password is piped on stdin (first line), it is used as the -p argument
+# instead of requiring it on the command line where it would appear in ps.
 
 set -euo pipefail
 
+PW=""
+ARGS=()
+
+# Parse: if --stdin-password is the first arg, read one line from stdin as the
+# password and add -p <pw> to the args. Remaining args go to the supplicant.
+if [ "${1:-}" = "--stdin-password" ]; then
+    shift
+    IFS= read -r PW || true
+fi
+ARGS=("$@")
+
+# If we got a password from stdin, inject it as -p <password>.
+# If -p is already in ARGS, the supplicant's later arg wins (minieap/mentohust
+# both use last-wins for most flags).
+if [ -n "$PW" ]; then
+    ARGS+=("-p" "$PW")
+fi
+
 if command -v minieap >/dev/null 2>&1; then
-    exec minieap "$@"
+    exec minieap "${ARGS[@]}"
 elif command -v mentohust >/dev/null 2>&1; then
-    exec mentohust "$@"
+    exec mentohust "${ARGS[@]}"
 else
     echo "Neither minieap nor mentohust is installed." >&2
     exit 127

@@ -108,7 +108,17 @@ QByteArray EadProtocol::buildPostureXml() const {
 
 void EadProtocol::transmit(const QByteArray& pkt) {
     m_lastPkt = pkt;
-    const auto addr = QHostInfo::fromName(m_host).addresses().value(0, QHostAddress(m_host));
+    const auto addrs = QHostInfo::fromName(m_host).addresses();
+    QHostAddress addr;
+    if (!addrs.isEmpty()) {
+        addr = addrs.first();
+    } else {
+        addr = QHostAddress(m_host);
+        if (addr.isNull()) {
+            emit logLine(tr("EAD: DNS resolution failed for %1").arg(m_host));
+            return;
+        }
+    }
     m_sock->writeDatagram(pkt, addr, m_port);
     if (m_retry) m_retry->start();
 }

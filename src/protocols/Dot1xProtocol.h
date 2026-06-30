@@ -27,7 +27,8 @@ public:
     void disconnect() override;
 
 private:
-    void startProcess(const QString& binary, const QStringList& args);
+    void startProcess(const QString& binary, const QStringList& args,
+                      const QByteArray& stdinData = {});
     void onReadyRead();
     void onFinished(int exitCode, int exitStatus);
     void pollStats();

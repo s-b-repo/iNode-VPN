@@ -362,8 +362,8 @@ class SslVpnSession:
                 self.auth.conn.get(self.auth.gateway.logout_url, ua=C.UA_V7,
                                    cookies=True)
                 self._log("logged out")
-            except Exception:
-                pass
+            except Exception as exc:
+                self._log(f"logout request failed (ignored): {exc}")
 
 
 def _is_verify_error(result: P.LoginResult) -> bool:

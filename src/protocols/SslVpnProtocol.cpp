@@ -8,6 +8,7 @@
 #include <QDateTime>
 #include <QFileInfo>
 #include <QProcess>
+#include <QProcessEnvironment>
 #include <QStandardPaths>
 #include <QTimer>
 
@@ -170,12 +171,15 @@ void SslVpnProtocol::connectWith(const Profile& profile) {
         py << QStringLiteral("--ead");
 
     // Zero-Trust / SDP single-packet-authorization knock before connecting.
+    // The SPA key is sensitive and must not appear in argv/ps.
     if (!profile.sslvpnSpaKey.isEmpty()) {
-        py << QStringLiteral("--spa-key") << profile.sslvpnSpaKey;
+        QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+        env.insert(QStringLiteral("H3C_SPA_KEY"), profile.sslvpnSpaKey);
         if (!profile.sslvpnSpaAid.isEmpty())
-            py << QStringLiteral("--spa-aid") << profile.sslvpnSpaAid;
+            env.insert(QStringLiteral("H3C_SPA_AID"), profile.sslvpnSpaAid);
         if (!profile.sslvpnSpaPorts.isEmpty())
-            py << QStringLiteral("--spa-ports") << profile.sslvpnSpaPorts;
+            env.insert(QStringLiteral("H3C_SPA_PORTS"), profile.sslvpnSpaPorts);
+        m_proc->setProcessEnvironment(env);
     }
 
     // CAPTCHA: the gateways that use one ship a weak (but noisy) image; the

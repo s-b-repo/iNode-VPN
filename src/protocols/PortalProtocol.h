@@ -4,6 +4,7 @@
 #include "core/Protocol.h"
 
 class QUdpSocket;
+class QHostAddress;
 class QTimer;
 
 namespace inode {
@@ -49,6 +50,7 @@ private:
     void sendLogout();
     void onDatagram();
     void onKeepAlive();
+    QHostAddress resolveHost() const;    // DNS resolve m_host once, with fallback
 
     // H3C proprietary dialect (m_dialect == 1).
     void sendH3cLogin();

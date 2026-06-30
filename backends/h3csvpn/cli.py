@@ -153,6 +153,25 @@ def main(argv=None) -> int:
                    captcha_retries=settings.captcha_retries,
                    show_captcha=settings.show_captcha)
 
+    # Zero-Trust / SDP: read SPA key from env var (H3C_SPA_KEY) so it never
+    # appears in argv/ps. Set by the Qt GUI via QProcessEnvironment.
+    spa_key = os.environ.get("H3C_SPA_KEY", "")
+    if spa_key:
+        import binascii
+        from .spa import SpaConfig
+        def _unhex(s: str) -> bytes:
+            return binascii.unhexlify(s.replace(":", "").replace(" ", "")) if s else b""
+        try:
+            ports = tuple(int(p) for p in os.environ.get("H3C_SPA_PORTS", "443").split(",")
+                          if p.strip()) or (C.SPA_AUTH_PORT,)
+            opts.zero_trust = SpaConfig(
+                aid=_unhex(os.environ.get("H3C_SPA_AID", "")),
+                client_key=_unhex(spa_key), ports=ports)
+            sys.stderr.write(f"[SPA] Zero-Trust knock enabled (ports={ports})\\n")
+        except (binascii.Error, ValueError) as exc:
+            sys.stderr.write(f"[x] invalid SPA env value: {exc}\\n")
+            return 2
+
     def log(msg: str) -> None:
         sys.stderr.write(msg + "\n")
 

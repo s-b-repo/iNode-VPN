@@ -122,6 +122,16 @@ static QByteArray userIpFromLocal(const QString& iface) {
 
 PortalProtocol::PortalProtocol(QObject* parent) : IProtocol(parent) {}
 
+QHostAddress PortalProtocol::resolveHost() const {
+    const auto addrs = QHostInfo::fromName(m_host).addresses();
+    if (!addrs.isEmpty()) return addrs.first();
+    QHostAddress fallback(m_host);
+    if (!fallback.isNull()) return fallback;
+    Logger::instance().warn(
+        QStringLiteral("Portal: DNS resolution failed for %1").arg(m_host));
+    return {};
+}
+
 PortalProtocol::~PortalProtocol() {
     if (m_sock) { m_sock->close(); }
 }
@@ -189,7 +199,7 @@ void PortalProtocol::sendChallenge() {
     std::memcpy(pkt.data() + 16, md5(forHash).constData(), 16);
 
     Logger::instance().info(tr("Portal: REQ_CHALLENGE → %1:%2").arg(m_host).arg(m_port));
-    const auto addr = QHostInfo::fromName(m_host).addresses().value(0, QHostAddress(m_host));
+    const auto addr = resolveHost();
     m_sock->writeDatagram(pkt, addr, m_port);
     setState(ConnectionState::Authenticating);
 }
@@ -219,7 +229,7 @@ void PortalProtocol::sendAuth(const QByteArray& challenge) {
     std::memcpy(full.data() + 16, md5(forHash).constData(), 16);
 
     Logger::instance().info(tr("Portal: REQ_AUTH user='%1' reqId=%2").arg(m_user).arg(m_reqId));
-    const auto addr = QHostInfo::fromName(m_host).addresses().value(0, QHostAddress(m_host));
+    const auto addr = resolveHost();
     m_sock->writeDatagram(full, addr, m_port);
 }
 
@@ -228,7 +238,7 @@ void PortalProtocol::sendAffirm() {
     pkt[15] = 0;
     QByteArray forHash = pkt + m_secret.toUtf8();
     std::memcpy(pkt.data() + 16, md5(forHash).constData(), 16);
-    const auto addr = QHostInfo::fromName(m_host).addresses().value(0, QHostAddress(m_host));
+    const auto addr = resolveHost();
     m_sock->writeDatagram(pkt, addr, m_port);
     Logger::instance().info(QStringLiteral("Portal: AFF_ACK_AUTH sent"));
 }
@@ -240,7 +250,7 @@ void PortalProtocol::sendLogout() {
     pkt[15] = 0;
     QByteArray forHash = pkt + m_secret.toUtf8();
     std::memcpy(pkt.data() + 16, md5(forHash).constData(), 16);
-    const auto addr = QHostInfo::fromName(m_host).addresses().value(0, QHostAddress(m_host));
+    const auto addr = resolveHost();
     m_sock->writeDatagram(pkt, addr, m_port);
     Logger::instance().info(QStringLiteral("Portal: REQ_LOGOUT sent"));
 }
@@ -354,7 +364,7 @@ void PortalProtocol::sendH3cLogin() {
 
     Logger::instance().info(tr("Portal(H3C): LOGIN_REQUEST user='%1' (%2 attrs)")
                                 .arg(m_user).arg(attrNum));
-    const auto addr = QHostInfo::fromName(m_host).addresses().value(0, QHostAddress(m_host));
+    const auto addr = resolveHost();
     m_sock->writeDatagram(full, addr, m_port);
     setState(ConnectionState::Authenticating);
 }
@@ -367,7 +377,7 @@ void PortalProtocol::sendH3cHeartbeat() {
     QByteArray full = pkt + attrs;
     QByteArray forHash = full + m_secret.toUtf8();
     std::memcpy(full.data() + 16, md5(forHash).constData(), 16);
-    const auto addr = QHostInfo::fromName(m_host).addresses().value(0, QHostAddress(m_host));
+    const auto addr = resolveHost();
     m_sock->writeDatagram(full, addr, m_port);
 }
 
@@ -381,7 +391,7 @@ void PortalProtocol::sendH3cLogout() {
     QByteArray full = pkt + attrs;
     QByteArray forHash = full + m_secret.toUtf8();
     std::memcpy(full.data() + 16, md5(forHash).constData(), 16);
-    const auto addr = QHostInfo::fromName(m_host).addresses().value(0, QHostAddress(m_host));
+    const auto addr = resolveHost();
     m_sock->writeDatagram(full, addr, m_port);
     Logger::instance().info(QStringLiteral("Portal(H3C): LOGOUT_REQUEST sent"));
 }
@@ -410,7 +420,7 @@ void PortalProtocol::replyH3cHashChallenge(const QByteArray& data) {
     QByteArray full = pkt + attrs;
     QByteArray forHash = full + m_secret.toUtf8();
     std::memcpy(full.data() + 16, md5(forHash).constData(), 16);
-    const auto addr = QHostInfo::fromName(m_host).addresses().value(0, QHostAddress(m_host));
+    const auto addr = resolveHost();
     m_sock->writeDatagram(full, addr, m_port);
     Logger::instance().warn(QStringLiteral(
         "Portal(H3C): answered anti-track hash challenge (best-effort; "
