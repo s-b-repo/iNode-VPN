@@ -44,7 +44,7 @@ jobs:
         run: cmake --build build -j$(nproc)
 
       - name: Smoke test (version)
-        run: QT_QPA_PLATFORM=offscreen ./build/iNodeClient-Qt --version 2>&1 || true
+        run: QT_QPA_PLATFORM=offscreen ./build/iNodeClient-Qt --version
 
       - name: Check binary
         run: file build/iNodeClient-Qt && ldd build/iNodeClient-Qt
@@ -68,7 +68,7 @@ jobs:
         run: cmake --build build -j$(sysctl -n hw.logicalcpu)
 
       - name: Smoke test (version)
-        run: QT_QPA_PLATFORM=offscreen ./build/iNodeClient-Qt --version 2>&1 || true
+        run: QT_QPA_PLATFORM=offscreen ./build/iNodeClient-Qt --version
 
       - name: Check binary
         run: file build/iNodeClient-Qt && otool -L build/iNodeClient-Qt

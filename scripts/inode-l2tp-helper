@@ -48,6 +48,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n $NAME ]] || die "--name required"
+# Reject anything that could escape the config file paths.
+[[ $NAME =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "invalid --name"
+
+need_root
 
 # Read secrets off stdin (PSK on line 1, password on line 2) so they never
 # appear in argv / `ps`.
@@ -55,8 +59,6 @@ if [[ $SECRETS_STDIN -eq 1 ]]; then
     IFS= read -r PSK      || true
     IFS= read -r PASSWORD || true
 fi
-
-need_root
 
 IPSEC_FRAG=/etc/ipsec.conf.d/${NAME}.conf
 IPSEC_SECRETS=/etc/ipsec.d/${NAME}.secrets
@@ -128,8 +130,12 @@ EOF
         chmod 600 "$PPP_PEER"
 
         # Merge into chap-secrets without duplicating.
+        # Use grep -v instead of sed to avoid regex injection via $USERNAME.
         touch "$PPP_CHAP"; chmod 600 "$PPP_CHAP"
-        sed -i "\|^${USERNAME}[[:space:]]|d" "$PPP_CHAP"
+        if grep -q "^${USERNAME}[[:space:]]" "$PPP_CHAP" 2>/dev/null; then
+            grep -v "^${USERNAME}[[:space:]]" "$PPP_CHAP" > "${PPP_CHAP}.tmp" && \
+                mv "${PPP_CHAP}.tmp" "$PPP_CHAP"
+        fi
         printf '%s\t*\t%s\t*\n' "$USERNAME" "$PASSWORD" >> "$PPP_CHAP"
 
         # Include our fragment from the main ipsec.conf if not already.

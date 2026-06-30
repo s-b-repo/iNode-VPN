@@ -223,14 +223,22 @@ def _original_default_gw() -> str:
 
 
 def _atomic_write(path: str, data: bytes) -> None:
-    """Write ``data`` to ``path`` atomically (tmp + os.replace) so a crash
-    mid-write can't leave a truncated file."""
-    tmp = f"{path}.h3c-tmp.{os.getpid()}"
-    with open(tmp, "wb") as f:
-        f.write(data)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+    """Write ``data`` to ``path`` atomically (O_EXCL tmp + os.replace)."""
+    import tempfile
+    dirname = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=dirname, prefix=".h3c-tmp.")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def have_root() -> bool:

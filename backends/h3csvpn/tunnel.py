@@ -122,9 +122,9 @@ def parse_netconfig(data: bytes) -> NetworkConfig:
             cfg.ipv6dns = _split(val)
         elif key == "IPV6ROUTES":
             cfg.ipv6routes = _split(val)
-    # A "0.0.0.0/0" route or explicit default flag means redirect-all.
+    # A "0.0.0.0/0" route or empty routes means redirect-all (full tunnel).
     if any(r.startswith("0.0.0.0") for r in cfg.routes) or not cfg.routes:
-        cfg.default_gateway = cfg.default_gateway or not cfg.routes
+        cfg.default_gateway = True
     return cfg
 
 

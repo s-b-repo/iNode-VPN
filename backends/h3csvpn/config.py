@@ -36,8 +36,17 @@ class Settings:
     def save(self) -> None:
         path = config_path()
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(asdict(self), f, indent=2)
-            f.write("\n")
-        os.replace(tmp, path)
+        import tempfile
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".",
+                                    prefix=".h3csvpn.tmp.")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(asdict(self), f, indent=2)
+                f.write("\n")
+            os.replace(tmp, path)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise

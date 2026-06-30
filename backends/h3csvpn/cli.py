@@ -81,8 +81,15 @@ def _split_host(gateway: str, default_port: int) -> tuple[str, int]:
         return sp.hostname or gateway, sp.port or default_port
     if ":" in gateway and gateway.count(":") == 1:
         h, _, port = gateway.partition(":")
+        # Reject CR/LF in hostname to prevent HTTP header injection
+        h = h.replace("\r", "").replace("\n", "")
+        if not h:
+            raise ValueError(f"empty host in {gateway!r}")
         return h, int(port)
-    return gateway, default_port
+    gw = gateway.replace("\r", "").replace("\n", "")
+    if not gw:
+        raise ValueError(f"empty host in {gateway!r}")
+    return gw, default_port
 
 
 def main(argv=None) -> int:

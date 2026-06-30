@@ -42,7 +42,7 @@ done
 
 [[ -n $IFACE ]] || die "--iface required"
 # Constrain to plausible interface names so nothing can smuggle shell/ip args.
-[[ $IFACE =~ ^[A-Za-z0-9._@:-]+$ ]] || die "invalid --iface"
+[[ $IFACE =~ ^[A-Za-z0-9][A-Za-z0-9._:@~-]*$ ]] || die "invalid --iface"
 [[ -n $IP ]]     || die "--ip required"
 [[ $IP =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || die "invalid --ip"
 [[ -n $PREFIX ]] || die "--prefix required"

@@ -187,7 +187,13 @@ class Connection:
             body = self._read_chunked()
         else:
             cl = tmp.header("Content-Length")
-            body = self._read_exact(int(cl)) if cl.isdigit() else b""
+            try:
+                cl_int = int(cl)
+                if str(cl_int) != cl.strip():
+                    raise HTTPError(f"non-integer Content-Length: {cl!r}")
+                body = self._read_exact(cl_int)
+            except ValueError:
+                raise HTTPError(f"bad Content-Length: {cl!r}")
         tmp.body = body
         return tmp
 
@@ -205,9 +211,16 @@ class Connection:
             except ValueError:
                 raise HTTPError(f"bad chunk size: {size_line!r}")
             if size == 0:
-                # drain optional trailer header lines up to the terminating CRLF
-                while self._read_until(b"\r\n") != b"\r\n":
-                    pass
+                # drain optional trailer header lines up to the terminating CRLF.
+                # Cap the number of trailer lines to prevent DoS from a malicious
+                # server that sends endless trailers without a terminator.
+                trailers = 0
+                while True:
+                    trailers += 1
+                    if trailers > 100:
+                        raise HTTPError("too many trailer lines (hostile response)")
+                    if self._read_until(b"\r\n") == b"\r\n":
+                        break
                 break
             out += self._read_exact(size)
             if len(out) > C.MAX_BODY_BYTES:
