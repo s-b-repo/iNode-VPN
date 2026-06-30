@@ -66,5 +66,6 @@ htmlcov/
 *.pid
 
 # Temporary / transient (the packaged runtime tree)
-bin/
+# Use bin/* not bin/ so !bin/.gitkeep can punch through
+bin/*
 !bin/.gitkeep

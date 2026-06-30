@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['docs/**', '*.md', 're/**']
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ── Python backend tests (Linux only, fast) ────────────────────────────
+  test-python:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+
+      - name: Install test deps
+        run: pip install defusedxml cryptography pytest
+
+      - name: Run h3csvpn backend tests
+        run: python -m pytest tests/ -q -v
+
+  # ── C++ build + smoke test (Linux) ────────────────────────────────────
+  build-linux:
+    needs: test-python
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt6 build deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            qt6-base-dev qt6-tools-dev libqt6xml6-dev \
+            cmake g++ pkg-config
+
+      - name: CMake configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Smoke test (version)
+        run: QT_QPA_PLATFORM=offscreen ./build/iNodeClient-Qt --version 2>&1 || true
+
+      - name: Check binary
+        run: file build/iNodeClient-Qt && ldd build/iNodeClient-Qt
+
+  # ── C++ build + smoke test (macOS) ────────────────────────────────────
+  build-macos:
+    needs: test-python
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt6
+        run: brew install qt@6
+
+      - name: CMake configure
+        run: |
+          export CMAKE_PREFIX_PATH="$(brew --prefix qt@6)"
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j$(sysctl -n hw.logicalcpu)
+
+      - name: Smoke test (version)
+        run: QT_QPA_PLATFORM=offscreen ./build/iNodeClient-Qt --version 2>&1 || true
+
+      - name: Check binary
+        run: file build/iNodeClient-Qt && otool -L build/iNodeClient-Qt

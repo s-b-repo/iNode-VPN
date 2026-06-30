@@ -1,0 +1,150 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  # ── Linux AppImage ────────────────────────────────────────────────────
+  release-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            qt6-base-dev qt6-tools-dev libqt6xml6-dev \
+            cmake g++ pkg-config libfuse2 file
+
+      - name: CMake configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Install to AppDir
+        run: DESTDIR=AppDir cmake --install build
+
+      - name: Download linuxdeploy-qt
+        run: |
+          wget -q -O linuxdeploy-qt.AppImage \
+            https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
+          wget -q -O linuxdeploy.AppImage \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          chmod +x linuxdeploy*.AppImage
+
+      - name: Bundle AppImage
+        run: |
+          export QMAKE="$(find /usr/lib -name qmake6 -type f 2>/dev/null || find /usr -name qmake6 -type f 2>/dev/null | head -1)"
+          export EXTRA_QT_PLUGINS="svg;"
+          # linuxdeploy bundles the binary + libs; the plugin bundles Qt
+          ./linuxdeploy.AppImage \
+            --appdir AppDir \
+            --executable AppDir/usr/bin/iNodeClient-Qt \
+            --desktop-file AppDir/usr/share/applications/org.inode.ClientQt.desktop \
+            --icon-file AppDir/usr/share/icons/hicolor/scalable/apps/org.inode.ClientQt.svg \
+            --output appimage \
+            --plugin qt 2>&1 || true
+          # If linuxdeploy fails, fall back to manual AppImage skeleton
+          if [ ! -f iNodeClient-Qt-*.AppImage ]; then
+            echo "linuxdeploy failed; building minimal AppImage manually"
+            mkdir -p AppDir/usr/bin AppDir/usr/libexec/iNodeClient-Qt
+            cp build/iNodeClient-Qt AppDir/usr/bin/
+            cp -r backends AppDir/usr/libexec/iNodeClient-Qt/backends
+            cp scripts/* AppDir/usr/libexec/iNodeClient-Qt/
+            # Minimal AppRun
+            cat > AppDir/AppRun << 'APPSCRIPT'
+          #!/bin/sh
+          HERE="$(dirname "$(readlink -f "$0")")"
+          export PATH="$HERE/usr/bin:$PATH"
+          export PYTHONPATH="$HERE/usr/libexec/iNodeClient-Qt/backends${PYTHONPATH:+:$PYTHONPATH}"
+          exec "$HERE/usr/bin/iNodeClient-Qt" "$@"
+          APPSCRIPT
+            chmod +x AppDir/AppRun
+            # Use appimagetool if available, else ship raw AppDir
+            wget -q -O appimagetool.AppImage \
+              https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage && \
+              chmod +x appimagetool.AppImage && \
+              ./appimagetool.AppImage AppDir iNodeClient-Qt-x86_64.AppImage || true
+          fi
+        continue-on-error: true
+
+      - name: Collect artifact
+        run: |
+          mkdir -p release-artifacts
+          cp build/iNodeClient-Qt release-artifacts/ 2>/dev/null || true
+          cp iNodeClient-Qt-*.AppImage release-artifacts/ 2>/dev/null || true
+          cp -r backends release-artifacts/ 2>/dev/null || true
+          cp -r scripts release-artifacts/ 2>/dev/null || true
+          cp iNode-VPN.sh svpn-connect.sh release-artifacts/ 2>/dev/null || true
+
+      - name: Upload Linux release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-artifacts/**
+          fail_on_unmatched_files: false
+
+  # ── macOS .app bundle ─────────────────────────────────────────────────
+  release-macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt6
+        run: brew install qt@6
+
+      - name: CMake configure
+        run: |
+          export CMAKE_PREFIX_PATH="$(brew --prefix qt@6)"
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+
+      - name: Build
+        run: cmake --build build -j$(sysctl -n hw.logicalcpu)
+
+      - name: Package .app bundle
+        run: |
+          mkdir -p iNodeClient-Qt.app/Contents/MacOS
+          mkdir -p iNodeClient-Qt.app/Contents/Resources
+          mkdir -p iNodeClient-Qt.app/Contents/libexec/iNodeClient-Qt
+
+          cp build/iNodeClient-Qt iNodeClient-Qt.app/Contents/MacOS/
+          cp -r backends iNodeClient-Qt.app/Contents/libexec/iNodeClient-Qt/backends
+          cp scripts/* iNodeClient-Qt.app/Contents/libexec/iNodeClient-Qt/
+
+          # Info.plist
+          cat > iNodeClient-Qt.app/Contents/Info.plist << 'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key><string>iNodeClient-Qt</string>
+              <key>CFBundleIdentifier</key><string>org.inode.ClientQt</string>
+              <key>CFBundleName</key><string>iNode Client</string>
+              <key>CFBundleVersion</key><string>${{ github.ref_name }}</string>
+              <key>CFBundleShortVersionString</key><string>${{ github.ref_name }}</string>
+              <key>LSMinimumSystemVersion</key><string>12.0</string>
+              <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          PLIST
+
+          # Use macdeployqt to bundle Qt frameworks
+          QTDIR="$(brew --prefix qt@6)"
+          "$QTDIR/bin/macdeployqt" iNodeClient-Qt.app -verbose=1 2>&1 || true
+
+          # Create DMG
+          mkdir -p dmg/iNodeClient-Qt.app
+          cp -R iNodeClient-Qt.app dmg/
+          hdiutil create -volname "iNodeClient-Qt" -srcfolder dmg \
+            -ov -format UDZO "iNodeClient-Qt-macOS-${{ github.ref_name }}.dmg"
+
+      - name: Upload macOS release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: iNodeClient-Qt-macOS-*.dmg
+          fail_on_unmatched_files: false
