@@ -34,7 +34,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
-            qt6-base-dev qt6-tools-dev libqt6xml6-dev \
+            qt6-base-dev qt6-tools-dev \
             cmake g++ pkg-config
 
       - name: CMake configure

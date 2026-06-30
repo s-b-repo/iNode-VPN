@@ -91,7 +91,7 @@ set(INODE_SOURCES
 
 add_executable(iNodeClient-Qt
     ${INODE_SOURCES}
-    resources/resources.qrc
+    src/resources/resources.qrc
 )
 
 target_include_directories(iNodeClient-Qt PRIVATE src)
