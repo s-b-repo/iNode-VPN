@@ -130,9 +130,9 @@ endif()
 
 include(GNUInstallDirs)
 install(TARGETS iNodeClient-Qt RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-install(FILES resources/org.inode.ClientQt.desktop
+install(FILES src/resources/org.inode.ClientQt.desktop
         DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
-install(FILES resources/org.inode.ClientQt.svg
+install(FILES src/resources/org.inode.ClientQt.svg
         DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps)
 install(FILES scripts/inode-l2tp-helper scripts/inode-dot1x-helper scripts/inode-svpn-helper
               scripts/inode-ipcfg-helper
@@ -140,7 +140,7 @@ install(FILES scripts/inode-l2tp-helper scripts/inode-dot1x-helper scripts/inode
         PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE
                     GROUP_READ GROUP_EXECUTE
                     WORLD_READ WORLD_EXECUTE)
-install(FILES resources/org.inode.ClientQt.policy
+install(FILES src/resources/org.inode.ClientQt.policy
         DESTINATION ${CMAKE_INSTALL_DATADIR}/polkit-1/actions)
 
 # Bundled clean-room SSL VPN backend (pure-Python h3csvpn package). Driven by
