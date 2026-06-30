@@ -2,6 +2,8 @@
 
 An open-source, interoperable VPN client that speaks the **H3C iNode** protocol suite. Provides a Qt6/KF6 desktop GUI and a standalone CLI backend for the H3C SSL VPN ("V7"), plus 802.1X, L2TP/IPSec, Portal, EAD posture, and Zero-Trust SPA — all 100% FOSS.
 
+![Screenshot](docs/screenshot.png)
+
 ## What this is
 
 A complete, working alternative to the proprietary **H3C iNode Intelligent Client** (closed-source, ~71 MB, Qt5, Ubuntu-only, bundles ancient OpenSSL 1.1). This project:
