@@ -7,8 +7,8 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
-find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Widgets Network Xml)
-find_package(Qt6 6.5 COMPONENTS LinguistTools QUIET)
+find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Widgets Network Xml)
+find_package(Qt6 6.4 COMPONENTS LinguistTools QUIET)
 
 # Optional KDE Frameworks integration. App runs without them; we just prefer
 # KWallet / KConfig / KI18n when present.
