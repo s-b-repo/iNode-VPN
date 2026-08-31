@@ -1,221 +1,221 @@
-# iNode VPN Client — ready-to-use package
+# Usage Guide
 
-A self-contained build of the Qt6 **iNode Client** with a **working H3C SSL VPN**
-implementation. Nothing here needs installing — run it straight from this folder.
+Everyday use of the iNode VPN Client: the GUI, the CLI, profiles, trust
+options, and what to do when something doesn't connect.
 
-The SSL VPN is implemented by a bundled clean-room backend (`backends/h3csvpn`,
-reverse-engineered from the Linux iNode 7.3 client and validated against a live
-`SSLVPN-Gateway/7.0`) that the Qt app drives through a privileged helper.
+> Install first? See **[INSTALL.md](INSTALL.md)** — one command does it.
+> Anything below assumes `./deploy.sh` (system install) or `./deploy.sh
+> --local` (portable) has been run.
 
-## What's in here
+---
 
-```
-iNode-VPN.sh        ← launch the GUI
-svpn-connect.sh     ← quick SSL VPN connect from the command line (no GUI)
-bin/iNodeClient-Qt  ← the application
-backends/h3csvpn/   ← the SSL VPN protocol backend (Python)
-scripts/            ← privileged helpers (run via pkexec/sudo for the tunnel)
-docs/               ← protocol notes, security findings, CAPTCHA analysis
-```
+## Quick reference
 
-## Requirements
+| Task | Command |
+|---|---|
+| Launch GUI | `./iNode-VPN.sh` (portable) or `iNodeClient-Qt` (installed) |
+| Start hidden in tray | `iNodeClient-Qt --minimized` |
+| Connect a profile at launch | `iNodeClient-Qt --connect "Office"` |
+| List profiles | `iNodeClient-Qt --list-profiles` |
+| Connection status | `iNodeClient-Qt --status` |
+| Disconnect and exit | `iNodeClient-Qt --disconnect` |
+| Environment report | `iNodeClient-Qt --doctor` |
+| CLI SSL VPN connect | `./svpn-connect.sh <gw>:<port> <user> [domain]` |
+| CLI auth-only (no root) | `./svpn-connect.sh --auth-only <gw>:<port> <user> [domain]` |
 
-Already present on this machine:
+---
 
-- `qt6-base-dev`, `cmake`, `g++` — Qt/C++ toolchain
-- `python3` with `bcrypt`, `cryptography`, `psutil` — SSL VPN backend extras
-- `polkit` + a running polkit **authentication agent** — the GUI escalates to
-  root through `pkexec`, which needs an agent to show the auth dialog
-- `libpolkit-qt6-1-1` — GUI root-auth integration
-
-Optional:
-
-- `tesseract-ocr` — only for automatic CAPTCHA OCR. Without it the backend still
-  works, but CAPTCHAs must be solved manually via `--show-captcha` + `--vldcode`.
-
-## Building from source (only if you change the C++)
-
-```bash
-cd <repo-path>
-rm -rf build && mkdir -p build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=RelWithDebInfo
-cmake --build . -j2
-cp iNodeClient-Qt ../bin/           # place the binary next to the launch scripts
-cd ..
-chmod -R go-w backends              # see "group/other-writable" note below
-```
-
-## Running the GUI
+## The GUI
 
 ```bash
 ./iNode-VPN.sh
 ```
 
-`iNode-VPN.sh` resolves paths relative to the repo root, so the binary runs
-without being system-installed. From the repo root, `./bin/iNodeClient-Qt` also
-accepts the CLI flags (`--list-profiles`, `--connect <profile>`, `--status`, …).
+1. **Add a profile** (＋ in the profile list) → give it a name.
+2. Pick the **Protocol**:
+   - **SSL VPN** — gateway host/port, username, domain (`RADIUS`, `system`,
+     `local`, … — as your gateway calls it).
+   - **802.1X / WLAN / L2TP-IPSec / Portal** — see the per-protocol fields in
+     the editor; each stores its own credentials.
+3. **Trust settings** (SSL VPN): for self-signed gateways set either a
+   **SHA-256 pin** or a **CA file**. Verification is on by default; `--insecure`
+   exists on the CLI but the GUI steers you to pinning.
+4. Enter the password and tick **Store password** — it goes into the
+   credential backend (KWallet / Secret Service / **GPG** / AES-GCM file —
+   whichever is active, as shown by `--doctor`).
+5. **Connect.** Tunnels request root through polkit only when needed; the
+   tray icon shows state, and stats/log panes show live traffic + events.
 
-## Running the SSL VPN backend (Python)
+Closing the window keeps the app in the tray when a tray is available; quit
+from the tray menu or `iNodeClient-Qt --disconnect`.
 
-The backend is a normal Python package inside `backends/h3csvpn/`. It is **not**
-installed into site-packages, so run it with `PYTHONPATH`/`PYTHONSAFEPATH`
-pointed at the bundled directory:
+---
 
-```bash
-cd <repo-path>
+## The CLI (SSL VPN)
 
-# Show help / verify the backend runs:
-PYTHONPATH=backends PYTHONSAFEPATH=1 python3 -m h3csvpn --help
-
-# Authenticate only — no tunnel, no root:
-PYTHONPATH=backends PYTHONSAFEPATH=1 python3 -m h3csvpn <gateway[:port]> -u <user> [-d domain] --no-tunnel -v
-
-# Full tunnel via shell wrapper (recommended):
-./svpn-connect.sh <gateway[:port]> <username> [domain]
-```
-
-`PYTHONSAFEPATH=1` ensures Python only loads modules from the `PYTHONPATH`
-directory, matching the backend's security expectations. `svpn-connect.sh`
-already exports both env vars and handles privilege escalation (`pkexec`, then
-`sudo`) when creating the TUN device.
-
-## Quick connect examples
+`svpn-connect.sh` wraps the Python backend (`backends/h3csvpn`) and handles
+`PYTHONPATH` + privilege escalation for you:
 
 ```bash
-# Test credentials only — no tunnel, no root:
-PYTHONPATH=backends PYTHONSAFEPATH=1 python3 -m h3csvpn vpn.example.com -u alice -d RADIUS --no-tunnel -v
+# Credentials only — verifies TLS + CAPTCHA + login, no tunnel, no root:
+./svpn-connect.sh --auth-only vpn.example.com:443 alice RADIUS
 
-# Full tunnel:
+# Full tunnel (TUN device; escalates via pkexec, falls back to sudo):
 ./svpn-connect.sh vpn.example.com:443 alice RADIUS
 
-# Self-signed gateway — pin the cert (secure) or skip verification:
-./svpn-connect.sh gw:443 alice -- --pin-sha256 AA:BB:CC:...
+# Self-signed gateway — PIN IT (secure):
+./svpn-connect.sh gw:443 alice -- --pin-sha256 AA:BB:CC:…
+
+# Legacy gateway that really can't verify (opt-in, warned):
 ./svpn-connect.sh gw:443 alice -- --insecure
+
+# Direct backend invocation (no wrapper):
+PYTHONPATH=backends python3 -m h3csvpn gw:443 -u alice -d RADIUS -v
 ```
 
-Get a self-signed gateway's pin:
+**Password handling:** read from `$H3C_SVPN_PASSWORD` if set, otherwise
+prompted without echo — never on a command line, never in `ps`.
+**Ctrl-C** = clean logout + tunnel teardown.
+
+**Get a gateway's pin** (trust-on-first-use helper):
+
 ```bash
 openssl s_client -connect HOST:PORT </dev/null 2>/dev/null \
   | openssl x509 -fingerprint -sha256 -noout
 ```
 
-## Password handling
+**CAPTCHA:** with `tesseract-ocr` installed the backend solves it
+automatically (`--auto-captcha`, default on). Without it, solve manually:
+`--show-captcha` renders the image, then pass `--vldcode <answer>`.
 
-The password is read from `$H3C_SVPN_PASSWORD` if set, otherwise prompted
-securely (never echoed, never placed on a command line). Press **Ctrl-C** to
-disconnect; the helper logs out and tears the tunnel down cleanly.
+---
 
-## GUI quick start
+## Credential storage
+
+Where saved passwords live depends on your system; the first available backend
+wins (shown by `iNodeClient-Qt --doctor`):
+
+1. **KWallet** — KDE, unlocked by login (KF6 build)
+2. **Secret Service** — gnome-keyring, KeePassXC, ksecretd
+3. **system GnuPG** — sealed to your GPG key; **gpg-agent + pinentry own the
+   passphrase** (a dialog may appear on first use; the agent caches it
+   afterwards). No key? Falls back to symmetric encryption, still via
+   pinentry. Data: `~/.config/iNodeClient-Qt/secrets.gpg` (0600, atomic).
+4. **AES-256-GCM file** — master password chosen on first save, held in memory
+   only, PBKDF2 (200k) + random salt, `secrets.enc` clamped to 0600.
+
+GPG setup (optional, recommended if you already run a keyring):
 
 ```bash
-./iNode-VPN.sh
+gpg --full-gen-key
+iNodeClient-Qt --doctor   # → [ok] GnuPG — GPG (key XXXXXXXX…)
 ```
 
-Add a profile → **Protocol = SSL VPN** → fill gateway host/port, username,
-domain → under trust set a CA file or SHA-256 pin for self-signed gateways →
-**Connect**. The GUI prompts for root via polkit when bringing the tunnel up.
+Forgetting a profile clears the entry from **all** backends.
 
-## Troubleshooting the SSL VPN connection
+---
 
-The three errors below account for essentially every failed first connect. Work
-through them in order.
+## Troubleshooting
+
+Work top-down; the first three cover essentially every failed first connect.
 
 ### 1. "backend is group/other-writable; refusing to load it as root"
 
 ```
 [INFO] helper: backend is group/other-writable; refusing to load it as root: .../backends
-[INFO] SSL VPN backend exited with code 1
 [ERR ] SSL VPN: backend exited with code 1
 ```
 
-The privileged helper runs as root and imports Python from `backends/h3csvpn/`.
-To stop a malicious module being swapped in, it **refuses** to load if any file
-under that tree is group- or other-writable (`find … -perm /022`).
-
-This trips right after unzipping `Archive.zip` or rebuilding, because this
-system's default **`umask 002`** creates files group-writable (664/775). Fix the
-tree — no `sudo` needed, it's owned by your user:
+The root helper refuses to import Python from `backends/h3csvpn` while any
+file there is group/other-writable (so a malicious module can't be swapped
+in). Typically caused by `umask 002` after unzipping/rebuilding:
 
 ```bash
-cd <repo-path>
-chmod -R go-w backends                          # drop group/other write bits
-find backends -type d -exec chmod 755 {} \;     # keep directories traversable
-# verify (must print nothing):
-find backends/h3csvpn -perm /022 -print
+chmod -R go-w backends
+find backends -type d -exec chmod 755 {} \;
+find backends/h3csvpn -perm /022 -print    # must print nothing
 ```
 
-Because `umask 002` re-introduces group-write on regenerated files, **re-run
-`chmod -R go-w backends` after every rebuild or re-extract.** (Making it durable:
-`umask 022` in your `~/.zshrc` stops new files being group-writable in the first
-place.)
+Re-run after every rebuild/re-extract, or set `umask 022` in your shell rc.
+(System installs are unaffected — the installed copy lands root-owned.)
 
 ### 2. "No stored password for profile."
 
 ```
 [ERR ] No stored password for profile.
-[WARN] not auto-reconnecting — this looks like a permanent error: No stored password for profile.
 ```
 
-The GUI only reads the password from the system keyring — it does **not** prompt
-at connect time. Open the profile for editing, type your password into
-**Password**, tick **Store password (encrypted in the system keyring)**, and
-save the profile before connecting.
+The GUI reads the password from the credential backend — it does **not**
+prompt at connect time. Edit the profile, type the password, tick **Store
+password**, save. First save may open a pinentry dialog (GPG backend) or ask
+for a master password (AES-GCM fallback) — that's the backend, not a bug.
 
 ### 3. "sudo: a password is required"
 
 ```
 [INFO] sudo: a password is required
-[INFO] SSL VPN backend exited with code 1
+[INFO] SSL VPN: backend exited with code 1
 ```
 
-Creating the TUN device needs root. The GUI prefers `pkexec` and only falls back
-to `sudo -n` (non-interactive) when `pkexec` is **not on PATH**. You hit this
-only if `pkexec` is missing *and* there's no passwordless sudo rule. Pick one:
+The tunnel needs root and `pkexec` wasn't found. Fixes:
 
-- **Use pkexec (recommended on this machine — it already works):** ensure a
-  polkit authentication agent is running so `pkexec` can show its dialog. On this
-  A desktop with a polkit authentication agent running (e.g. GNOME/KDE ships
-  `polkit-kde-authentication-agent-1`), so the GUI
-  authenticates through the graphical prompt and **no sudoers rule is needed.**
-
-- **Passwordless sudo for the helper (only if you remove/lack pkexec):** restrict
-  it to the helper script alone. Note two things the common snippet gets wrong —
-  use **double quotes** so the username expands (single-quoted `'$USER …'` writes
-  a literal `$USER` that never matches), and use this machine's **real path**
-  (the repo path, matching where the GUI resolves the
-  helper):
+- **Preferred:** install/keep `pkexec` and ensure a **polkit authentication
+  agent** runs in your session (GNOME/KDE/XFCE ship one). The GUI then shows
+  a proper authentication dialog — no sudoers rule needed.
+- **Without pkexec:** allow only the helper, nothing else (double quotes so
+  `$USER` expands!):
 
   ```bash
-  echo "$(id -un) ALL=(root) NOPASSWD: <repo-path>/scripts/inode-svpn-helper *" \
+  echo "$(id -un) ALL=(root) NOPASSWD: /usr/libexec/iNodeClient-Qt/inode-svpn-helper *" \
     | sudo tee /etc/sudoers.d/inode-svpn-helper
   sudo chmod 440 /etc/sudoers.d/inode-svpn-helper
-  sudo visudo -cf /etc/sudoers.d/inode-svpn-helper    # validate syntax
+  sudo visudo -cf /etc/sudoers.d/inode-svpn-helper
   ```
 
-  Never grant unrestricted passwordless sudo — restrict it to the helper.
+  For portable mode use the repo path: `<repo>/scripts/inode-svpn-helper`.
 
-### CAPTCHA without `tesseract-ocr`
+### 4. Server-side login failures
 
-If automatic CAPTCHA solving is desired, install `tesseract-ocr`. Otherwise the
-GUI/backend still work; solve CAPTCHAs manually with `--show-captcha` +
-`--vldcode <answer>` where exposed.
+*"incorrect username or password, authentication server error, or number of
+users reaching the maximum allowed by an account"* — everything before the
+password check (TLS, CAPTCHA, login round-trip) already succeeded. The
+password is wrong/expired, the **domain** is wrong, or the account's
+concurrent-login cap is in use. Isolate with:
 
-## Notes on test gateways
+```bash
+./svpn-connect.sh --auth-only gw:443 user domain
+```
 
-When validating against your own test gateway, keep the address and any real
-account names **out of the repository** — use placeholders (`vpn.example.com`,
-`<user>`, `<domain>`) in examples and docs, and pass real values via
-environment/CLI at runtime. If login is rejected with *"incorrect username or
-password, authentication server error, or number of users reaching the maximum
-allowed by an account"*, that is **server-side**: the password is
-wrong/expired, the wrong domain was used, or the account's concurrent-login cap
-is already in use. Everything up to that point — TLS, CAPTCHA, the login
-round-trip — is confirmed working by the client.
+### 5. Wrong credentials *after* a password change
+
+The profile keeps using the stored (old) secret. Edit the profile → update
+the password → save (overwrites the stored entry in the active backend).
+
+### 6. GPG prompts appear when saving/reading passwords
+
+That's gpg-agent's pinentry doing its job. Cancel it = the backend operation
+fails cleanly (nothing saved/read). To stop prompts, let the agent cache the
+key (`gpg-agent` default) or use a `%no-protection` test key in VMs.
+
+### 7. Wireshark/`--doctor` says a tool is MISSING
+
+`--doctor` `[MISSING]` items are optional per feature — see the table in
+[INSTALL.md → Verify](INSTALL.md#5-verify-your-install). Install only what
+your protocols need.
+
+---
+
+## Test-gateway etiquette
+
+When validating against a real gateway, keep its address and account names
+**out of any repository or screenshot** — use placeholders
+(`vpn.example.com`, `<user>`, `<domain>`) and pass real values at runtime.
+A full validation methodology (captures, pins, byte-diffs) lives in
+[INTEROP.md](INTEROP.md).
 
 ## Limitations
 
-- GM/SM2 (CNTLS / SKF USB-Key) gateways are not supported (TLS-layer only).
-- Zero-Trust SDP registration is out of scope (only the SPA knock builder exists).
-- Linux only for the tunnel (TUN + `ip`); the protocol itself is OS-agnostic.
-- Without `tesseract-ocr`, CAPTCHA must be solved manually (`--show-captcha`
-  + `--vldcode <answer>`) instead of `--auto-captcha`.
+- GM/SM2 (CNTLS / SKF USB-Key) gateways: not supported (TLS-layer only).
+- Zero-Trust SDP registration: out of scope (SPA knock builder only).
+- Tunnel is Linux-only (TUN + `ip`); the protocol itself is OS-agnostic.
+- Without `tesseract-ocr`, CAPTCHAs are manual (`--show-captcha` + `--vldcode`).

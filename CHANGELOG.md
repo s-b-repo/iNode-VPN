@@ -3,6 +3,49 @@
 All notable changes to the iNode Client (Qt edition) are documented here.
 This project loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased] — 2026-08-31
+
+Deployment, security-hardening and documentation release.
+
+### Added
+- **One-shot `deploy.sh`**: distro-aware dependency install (apt/dnf/pacman/
+  zypper), build, system install with polkit registration, `--local` portable
+  mode, `--build-only`, `--uninstall`, and a trailing `--doctor` report.
+- **`--doctor` CLI**: environment self-check — Qt/KF6, all four credential
+  backends, external tools, privileged helpers, polkit action, Python backend.
+- **System-GnuPG credential backend** (`GpgFileStore`): credentials sealed to
+  the user's own GPG key (agent/pinentry own the passphrase; the app never
+  sees it), symmetric pinentry fallback when no key exists, 0600 atomic
+  writes at `~/.config/iNodeClient-Qt/secrets.gpg`. Wired into
+  `CredentialStore` between Secret Service and the AES-GCM file fallback.
+- **New docs**: `docs/INSTALL.md` (3 install methods, per-distro deps, GPG
+  setup, troubleshooting) and a rewritten `docs/USAGE.md`; README restructured
+  around them.
+
+### Fixed (security)
+- C8 (High): `inode-l2tp-helper` newline injection into root-owned
+  ipsec.conf/chap-secrets via `--server`/`--username`/PSK — strict
+  hostname/IP grammar, control-char and whitespace rejection, PSK quoting
+  guards.
+- C9 (Medium): `inode-svpn-helper stop` signalled the bare pidfile PID
+  (PID-reuse could kill an innocent process) — now verifies the recorded PID
+  is actually the h3csvpn backend via `/proc/<pid>/cmdline`.
+- C10 (Medium): `secrets.enc` written world-readable — clamped to 0600 at
+  every sync; write failures now propagate.
+- C11 (Low): `inode-ipcfg-helper` accepted out-of-range octets and
+  leading-zero octets (octal-parse hazard) — strict 0–255 per octet.
+- C12 (High, in-review): GPG backend decrypt-without-path (empty stdin) and
+  `QFile::rename` no-overwrite — every write after the first silently failed;
+  fixed + covered by in-process tests.
+- `deploy.sh`: polkit policy mirrored to `/usr/share` for non-`/usr` prefixes
+  (polkit only scans canonical dirs); CMake helper dir pinned to the policy's
+  exec paths (Debian triplet mismatch).
+- CI: python job referenced a nonexistent `tests/` — replaced with a backend
+  import check.
+- Leaked gateway address / account names / personal paths scrubbed from
+  docs and scripts; `captcha_lab.py` credentials replaced with interactive
+  prompts.
+
 ## [Unreleased] — 2026-06-22
 
 Audit pass over the UI/protocol layer: wired up controls that were collected but
