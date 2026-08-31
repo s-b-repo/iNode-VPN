@@ -41,6 +41,14 @@ bin/iNodeClient-Qt
 .env
 *.local
 
+# Local archives / snapshots (stale source copies must never be committed)
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+*.rar
+
 # Logs
 *.log
 logs/
