@@ -1,0 +1,126 @@
+name: Release
+
+"on":
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  # ── Linux portable tarball ─────────────────────────────────────────────
+  release-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            qt6-base-dev qt6-tools-dev cmake g++ pkg-config
+
+      - name: CMake configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Smoke test
+        run: QT_QPA_PLATFORM=offscreen ./build/iNodeClient-Qt --version
+
+      - name: Bundle portable tarball
+        run: |
+          PKG="iNodeClient-Qt-linux-x86_64-${{ github.ref_name }}"
+          mkdir -p "$PKG/bin" "$PKG/backends" "$PKG/scripts"
+
+          cp build/iNodeClient-Qt "$PKG/bin/"
+          cp -r backends/h3csvpn "$PKG/backends/"
+          cp scripts/* "$PKG/scripts/"
+          cp iNode-VPN.sh svpn-connect.sh "$PKG/"
+          cp README.md LICENSE "$PKG/"
+          chmod +x "$PKG/bin/iNodeClient-Qt" "$PKG/scripts/"* "$PKG/"*.sh
+
+          # Self-contained launcher that finds backends relative to itself
+          cat > "$PKG/iNodeClient-Qt.sh" << 'LAUNCHER'
+          #!/bin/sh
+          DIR="$(cd "$(dirname "$0")" && pwd)"
+          export PYTHONPATH="$DIR/backends${PYTHONPATH:+:$PYTHONPATH}"
+          export PYTHONSAFEPATH=1
+          exec "$DIR/bin/iNodeClient-Qt" "$@"
+          LAUNCHER
+          chmod +x "$PKG/iNodeClient-Qt.sh"
+
+          tar czf "${PKG}.tar.gz" "$PKG"
+          ls -lh "${PKG}.tar.gz"
+
+      - name: Upload Linux release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: iNodeClient-Qt-linux-x86_64-*.tar.gz
+          fail_on_unmatched_files: false
+
+  # ── macOS .app bundle .dmg ─────────────────────────────────────────────
+  release-macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt6
+        run: brew install qt@6
+
+      - name: CMake configure
+        run: |
+          export CMAKE_PREFIX_PATH="$(brew --prefix qt@6)"
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j$(sysctl -n hw.logicalcpu)
+
+      - name: Smoke test
+        run: QT_QPA_PLATFORM=offscreen ./build/iNodeClient-Qt --version
+
+      - name: Package .app bundle
+        run: |
+          APP="iNodeClient-Qt.app"
+          mkdir -p "$APP/Contents/MacOS"
+          mkdir -p "$APP/Contents/Resources"
+          mkdir -p "$APP/Contents/libexec/iNodeClient-Qt"
+
+          cp build/iNodeClient-Qt "$APP/Contents/MacOS/"
+          cp -r backends "$APP/Contents/libexec/iNodeClient-Qt/backends"
+          cp scripts/* "$APP/Contents/libexec/iNodeClient-Qt/"
+
+          cat > "$APP/Contents/Info.plist" << 'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key><string>iNodeClient-Qt</string>
+              <key>CFBundleIdentifier</key><string>org.inode.ClientQt</string>
+              <key>CFBundleName</key><string>iNode Client</string>
+              <key>CFBundleVersion</key><string>${{ github.ref_name }}</string>
+              <key>CFBundleShortVersionString</key><string>${{ github.ref_name }}</string>
+              <key>LSMinimumSystemVersion</key><string>12.0</string>
+              <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          PLIST
+
+          # Use macdeployqt to bundle Qt frameworks into the .app
+          QTDIR="$(brew --prefix qt@6)"
+          "$QTDIR/bin/macdeployqt" "$APP" -verbose=1 2>&1
+
+          # Create .dmg
+          mkdir -p dmg_staging
+          cp -R "$APP" dmg_staging/
+          DMG="iNodeClient-Qt-macOS-${{ github.ref_name }}.dmg"
+          hdiutil create -volname "iNodeClient-Qt" -srcfolder dmg_staging \
+            -ov -format UDZO "$DMG"
+          ls -lh "$DMG"
+
+      - name: Upload macOS release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: iNodeClient-Qt-macOS-*.dmg
+          fail_on_unmatched_files: false

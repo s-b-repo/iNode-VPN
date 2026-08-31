@@ -1,0 +1,211 @@
+/* ============================================================================
+ * Mullvad-style modern dark theme for the iNode Client (Qt edition).
+ * Deep-navy surfaces, flat rounded controls, a green "connect" CTA and a red
+ * "disconnect" CTA, and a coloured status badge. Applied app-wide via
+ * QApplication::setStyleSheet().
+ * ========================================================================== */
+
+QWidget {
+    background-color: #182c43;          /* deep navy */
+    color: #e8eef5;
+    font-family: "Inter", "Segoe UI", "Noto Sans", "DejaVu Sans", sans-serif;
+    font-size: 13px;
+}
+
+QMainWindow, QDialog {
+    background-color: #142235;
+}
+
+/* ---- Tooltips ---- */
+QToolTip {
+    background-color: #0f1b2a;
+    color: #e8eef5;
+    border: 1px solid #2f4a6b;
+    padding: 5px 8px;
+    border-radius: 6px;
+}
+
+/* ---- Labels ---- */
+QLabel { background: transparent; color: #cdd9e8; }
+
+/* ---- Standard buttons ---- */
+QPushButton {
+    background-color: #294d73;
+    color: #ffffff;
+    border: none;
+    border-radius: 8px;
+    padding: 9px 16px;
+    font-weight: 600;
+}
+QPushButton:hover    { background-color: #335b88; }
+QPushButton:pressed  { background-color: #21405f; }
+QPushButton:disabled { background-color: #20344c; color: #6a7d92; }
+
+/* ---- Tool buttons (show-password, file pickers, etc.) ---- */
+QToolButton {
+    background-color: #294d73;
+    color: #ffffff;
+    border: none;
+    border-radius: 6px;
+    padding: 6px 10px;
+}
+QToolButton:hover   { background-color: #335b88; }
+QToolButton:pressed { background-color: #21405f; }
+QToolButton:checked { background-color: #2f6fb0; }
+
+/* ---- Big call-to-action connect / disconnect buttons ---- */
+QPushButton#ctaConnect {
+    background-color: #44ad4a;          /* Mullvad green */
+    color: #07210a;
+    font-size: 15px;
+    font-weight: 700;
+    padding: 14px 18px;
+    border-radius: 10px;
+}
+QPushButton#ctaConnect:hover    { background-color: #4fc456; }
+QPushButton#ctaConnect:pressed  { background-color: #3a9540; }
+QPushButton#ctaConnect:disabled { background-color: #2b4a44; color: #5f7a66; }
+
+QPushButton#ctaDisconnect {
+    background-color: #e34234;          /* red */
+    color: #2a0906;
+    font-size: 15px;
+    font-weight: 700;
+    padding: 14px 18px;
+    border-radius: 10px;
+}
+QPushButton#ctaDisconnect:hover    { background-color: #f15546; }
+QPushButton#ctaDisconnect:pressed  { background-color: #c4392c; }
+QPushButton#ctaDisconnect:disabled { background-color: #45302e; color: #8a6a66; }
+
+/* ---- Status badge (objectName statusBadge, dynamic property "state") ---- */
+QLabel#statusBadge {
+    font-size: 16px;
+    font-weight: 700;
+    padding: 8px 14px;
+    border-radius: 8px;
+    background-color: #20344c;
+    color: #cdd9e8;
+}
+QLabel#statusBadge[state="connected"]     { background-color: #1d4a2a; color: #6ee87f; }
+QLabel#statusBadge[state="connecting"]    { background-color: #4a3f1d; color: #eccf63; }
+QLabel#statusBadge[state="failed"]        { background-color: #4a2320; color: #ff8a7d; }
+QLabel#statusBadge[state="disconnected"]  { background-color: #20344c; color: #9fb2c8; }
+
+/* ---- List (profiles) ---- */
+QListWidget {
+    background-color: #1b3049;
+    border: 1px solid #284563;
+    border-radius: 10px;
+    padding: 6px;
+    outline: 0;
+}
+/* Rows are fully painted by ProfileListDelegate, so keep the view rules minimal
+ * (no padding/selection background here — the delegate handles those). */
+QListWidget::item { padding: 0; margin: 0; border: none; }
+
+/* ---- Connection panel stat labels ---- */
+QLabel#statCaption { color: #7e93ab; font-size: 11px; }
+QLabel#statValue   { color: #e8eef5; font-size: 13px; font-weight: 600; }
+
+/* ---- Progress bar (indeterminate, shown while connecting) ---- */
+QProgressBar {
+    background-color: #0f1d2e;
+    border: none;
+    border-radius: 2px;
+}
+QProgressBar::chunk { background-color: #4fc456; border-radius: 2px; }
+
+/* ---- Text inputs ---- */
+QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox, QComboBox {
+    background-color: #0f1d2e;
+    color: #e8eef5;
+    border: 1px solid #2c466a;
+    border-radius: 8px;
+    padding: 7px 10px;
+    selection-background-color: #2f6fb0;
+}
+QLineEdit:focus, QPlainTextEdit:focus, QSpinBox:focus, QComboBox:focus {
+    border: 1px solid #4a90d9;
+}
+QPlainTextEdit {
+    font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace;
+    font-size: 12px;
+}
+
+QComboBox::drop-down { border: none; width: 22px; }
+QComboBox QAbstractItemView {
+    background-color: #0f1d2e;
+    border: 1px solid #2c466a;
+    border-radius: 6px;
+    selection-background-color: #2f6fb0;
+    outline: 0;
+}
+
+/* ---- Checkboxes ---- */
+QCheckBox { spacing: 8px; background: transparent; color: #cdd9e8; }
+QCheckBox::indicator {
+    width: 18px; height: 18px;
+    border-radius: 5px;
+    border: 1px solid #3a557a;
+    background: #0f1d2e;
+}
+QCheckBox::indicator:checked {
+    background: #44ad4a;
+    border: 1px solid #44ad4a;
+}
+
+/* ---- Tabs ---- */
+QTabWidget::pane {
+    border: 1px solid #284563;
+    border-radius: 10px;
+    top: -1px;
+}
+QTabBar::tab {
+    background: transparent;
+    color: #9fb2c8;
+    padding: 9px 16px;
+    margin-right: 2px;
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+}
+QTabBar::tab:selected { background: #1b3049; color: #ffffff; }
+QTabBar::tab:hover    { color: #e8eef5; }
+
+/* ---- Menu bar / menus ---- */
+QMenuBar { background-color: #142235; color: #cdd9e8; }
+QMenuBar::item:selected { background: #294d73; border-radius: 6px; }
+QMenu {
+    background-color: #1b3049;
+    border: 1px solid #284563;
+    border-radius: 8px;
+    padding: 6px;
+}
+QMenu::item { padding: 7px 22px; border-radius: 6px; }
+QMenu::item:selected { background: #2f6fb0; }
+
+/* ---- Status bar ---- */
+QStatusBar { background-color: #0f1b2a; color: #9fb2c8; }
+QStatusBar::item { border: none; }
+
+/* ---- Scrollbars ---- */
+QScrollBar:vertical {
+    background: transparent; width: 10px; margin: 2px;
+}
+QScrollBar::handle:vertical {
+    background: #335b88; border-radius: 5px; min-height: 28px;
+}
+QScrollBar::handle:vertical:hover { background: #3f6c9f; }
+QScrollBar::add-line, QScrollBar::sub-line { height: 0; }
+QScrollBar:horizontal {
+    background: transparent; height: 10px; margin: 2px;
+}
+QScrollBar::handle:horizontal {
+    background: #335b88; border-radius: 5px; min-width: 28px;
+}
+
+/* ---- Splitter ---- */
+QSplitter::handle { background: #284563; }
+QSplitter::handle:vertical { height: 3px; }
+
+QToolTip { opacity: 240; }

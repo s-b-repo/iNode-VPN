@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=iNode Client (Qt)
+GenericName=Network Authentication Client
+Comment=Connect to H3C iNode-compatible networks (802.1X, Portal, VPN)
+Exec=iNodeClient-Qt
+Icon=org.inode.ClientQt
+Categories=Network;Qt;
+Keywords=VPN;802.1X;H3C;iNode;Portal;SSL;L2TP;
+StartupNotify=true
