@@ -44,9 +44,11 @@ void WlanProtocol::associate(const Profile& profile) {
     setState(ConnectionState::Connecting);
     Logger::instance().info(tr("WLAN: associating with SSID '%1' on %2").arg(m_ssid, m_iface));
 
-    QStringList args{QStringLiteral("device"), QStringLiteral("wifi"),
+    // --ask makes nmcli read the password from stdin. Passing it as the
+    // `password` argument would expose it in argv/ps to every local user.
+    QStringList args{QStringLiteral("--ask"),
+                     QStringLiteral("device"), QStringLiteral("wifi"),
                      QStringLiteral("connect"), m_ssid};
-    if (!pw.isEmpty()) { args << QStringLiteral("password") << pw; }
     if (!m_iface.isEmpty()) { args << QStringLiteral("ifname") << m_iface; }
     if (profile.wlanHiddenSsid) { args << QStringLiteral("hidden") << QStringLiteral("yes"); }
 
@@ -62,6 +64,10 @@ void WlanProtocol::associate(const Profile& profile) {
             [this, p, profile](int exitCode, QProcess::ExitStatus) {
         p->deleteLater();
         if (exitCode != 0) {
+            emit errorOccurred(tr("Wi-Fi association failed (nmcli exited with code %1) — "
+                                  "check the SSID and Wi-Fi password, that the network is "
+                                  "in range, and that NetworkManager manages %2.")
+                                   .arg(exitCode).arg(m_iface.isEmpty() ? tr("the Wi-Fi interface") : m_iface));
             setState(ConnectionState::Failed);
             return;
         }
@@ -69,6 +75,11 @@ void WlanProtocol::associate(const Profile& profile) {
     });
 
     p->start(QStandardPaths::findExecutable(QStringLiteral("nmcli")), args);
+    if (!pw.isEmpty()) {
+        p->write(pw.toUtf8());
+        p->write("\n");
+    }
+    p->closeWriteChannel();
 }
 
 void WlanProtocol::runDot1x(const Profile& profile) {

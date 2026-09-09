@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(iNodeClient-Qt VERSION 0.2.0 LANGUAGES CXX)
+project(iNodeClient-Qt VERSION 0.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -27,12 +27,12 @@ set(INODE_SOURCES
     src/core/AutoReconnect.cpp
     src/core/AutoReconnect.h
     src/core/ConnectionStats.h
+    src/core/ControlChannel.cpp
+    src/core/ControlChannel.h
     src/core/CredentialStore.cpp
     src/core/CredentialStore.h
     src/core/EncryptedFileStore.cpp
     src/core/EncryptedFileStore.h
-    src/core/GpgFileStore.cpp
-    src/core/GpgFileStore.h
     src/core/SecretServiceStore.cpp
     src/core/SecretServiceStore.h
     src/core/CustomXmlImporter.cpp
@@ -100,6 +100,9 @@ add_executable(iNodeClient-Qt
 
 target_include_directories(iNodeClient-Qt PRIVATE src)
 
+# Single source of truth for the version string shown by --version / --doctor.
+target_compile_definitions(iNodeClient-Qt PRIVATE INODE_VERSION="${PROJECT_VERSION}")
+
 target_link_libraries(iNodeClient-Qt PRIVATE
     Qt6::Core
     Qt6::Gui
@@ -157,6 +160,11 @@ install(FILES src/resources/org.inode.ClientQt.policy
 # Bundled clean-room SSL VPN backend (pure-Python h3csvpn package). Driven by
 # the SslVpn protocol plugin via inode-svpn-helper. Installed next to the
 # helpers so SslVpnProtocol::backendDir() can find it at runtime.
+# Explicit permissions: the root helper refuses a group/other-writable backend
+# tree, and a checkout made with umask 002 would otherwise be installed 664/775.
 install(DIRECTORY backends/h3csvpn
         DESTINATION ${INODE_HELPER_DIR}/backends
+        FILE_PERMISSIONS OWNER_READ OWNER_WRITE GROUP_READ WORLD_READ
+        DIRECTORY_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE
+                              GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE
         PATTERN "__pycache__" EXCLUDE)

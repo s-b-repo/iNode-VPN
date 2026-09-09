@@ -80,7 +80,8 @@ case "$cmd" in
         esac
         [[ -f "$BACKEND/h3csvpn/__init__.py" ]] || die "backend not found at $BACKEND"
         if [[ -n $(find "$BACKEND/h3csvpn" -perm /022 -print -quit 2>/dev/null) ]]; then
-            die "backend is group/other-writable; refusing to load it as root: $BACKEND"
+            die "backend is group/other-writable; refusing to load it as root: $BACKEND" \
+                "-- fix: ./deploy.sh --fix-perms  (or: chmod -R go-w '$BACKEND')"
         fi
         [[ ${#PYARGS[@]} -gt 0 ]] || die "connect requires -- <h3csvpn argv...>"
 

@@ -5,6 +5,8 @@
 
 #include <QByteArray>
 
+#include <functional>
+
 class QProcess;
 class QTimer;
 
@@ -35,14 +37,22 @@ public:
     void disconnect() override;
 
 private:
-    // Runs the privileged helper. Any secrets are passed on the helper's stdin
-    // (never in argv) so they cannot be seen in `ps` / /proc.
-    bool runHelper(const QStringList& args, const QByteArray& stdinData = {});
+    // Runs the privileged helper asynchronously (`ipsec up` can take tens of
+    // seconds — blocking the GUI thread for that long is unacceptable). Any
+    // secrets are passed on the helper's stdin (never in argv) so they cannot
+    // be seen in `ps` / /proc. `onDone` receives true iff the helper exited 0.
+    void runHelperAsync(const QStringList& args, const QByteArray& stdinData,
+                        std::function<void(bool)> onDone);
+    // Fire-and-forget teardown used from the destructor: starts the `down`
+    // invocation detached so quitting never blocks on strongswan.
+    void requestTeardownDetached();
     void pollStats();
 
     QUuid   m_profileId;
     QString m_connName;
     QTimer* m_statsTimer = nullptr;
+    QProcess* m_helper   = nullptr;
+    QTimer* m_helperTimeout = nullptr;
 };
 
 } // namespace inode

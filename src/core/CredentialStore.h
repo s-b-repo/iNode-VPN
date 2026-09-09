@@ -25,13 +25,15 @@ enum class SecretField {
 //   2. The freedesktop **Secret Service** (libsecret, dlopen'd at runtime) —
 //      gnome-keyring / ksecretd / KeePassXC etc. On most distros the default
 //      collection is "login" and is unlocked by the login password via PAM.
-//   3. The system **GnuPG** keyring — credentials sealed to the user's own
-//      GPG key (or symmetric, pinentry-prompted, when no key exists). The
-//      passphrase is exclusively gpg-agent's business; this app never sees
-//      it. Preferred by users who already run a PGP keyring.
-//   4. A local AES-256-GCM + PBKDF2 file, unlocked by a master password the
+//   3. A local AES-256-GCM + PBKDF2 file, unlocked by a master password the
 //      user types on first use (cached in memory for the session only). Used
 //      as a last resort when no keyring daemon is available.
+//
+// Legacy migration: credentials written by the removed system-GnuPG backend
+// (a gpg-sealed `secrets.gpg`) are transparently re-sealed into the active
+// backend on first use, after which the legacy file is renamed
+// `secrets.gpg.migrated`. gpg-agent/pinentry handles the passphrase during
+// that one-time decrypt — this app still never sees it.
 //
 // The XOR "scramble" fallback that shipped in earlier versions has been
 // removed — every path now writes ciphertext to disk.
@@ -43,7 +45,6 @@ public:
         None = 0,        // no backend usable (locked/refused/no libcrypto)
         KWallet,
         SecretService,
-        GpgFile,
         EncryptedFile,
     };
     Backend activeBackend() const;
@@ -75,11 +76,28 @@ public:
     // Clears every field for the profile (used when a profile is removed).
     bool forget(const QUuid& profileId);
 
+    // Session-only secrets: a password typed at connect time (or one the user
+    // chose not to store, or that the backend refused to store) is kept in
+    // memory for the lifetime of this process so the connection can proceed.
+    // retrieve() consults this overlay first. Never written to disk.
+    void setSessionSecret(const QUuid& profileId, SecretField field, const QString& secret);
+    void setSessionSecret(const QUuid& profileId, const QString& secret) {
+        setSessionSecret(profileId, SecretField::Password, secret);
+    }
+    void clearSessionSecrets(const QUuid& profileId);
+
 private:
     CredentialStore();
     ~CredentialStore();
     CredentialStore(const CredentialStore&) = delete;
     CredentialStore& operator=(const CredentialStore&) = delete;
+
+    // One-time re-seal of a leftover secrets.gpg (removed GnuPG backend) into
+    // the active backend; idempotent, gpg-agent handles the passphrase.
+    void migrateLegacyGpgStore();
+    // ensureLegacyMigration(): at-most-once wrapper (safe under event-loop
+    // re-entrancy while a prompt dialog is open).
+    void ensureLegacyMigration();
 
     struct Impl;
     Impl* d;

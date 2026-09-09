@@ -1,6 +1,7 @@
 #include "ProfileStore.h"
 
 #include "CredentialStore.h"
+#include "Logger.h"
 
 #include <QDir>
 #include <QFile>
@@ -240,9 +241,18 @@ void ProfileStore::save() const {
         arr.append(o);
     }
     QSaveFile f(storagePath());
-    if (!f.open(QIODevice::WriteOnly)) return;
+    if (!f.open(QIODevice::WriteOnly)) {
+        Logger::instance().error(QStringLiteral(
+            "profiles: cannot write %1 (%2) — changes are not persisted")
+            .arg(storagePath(), f.errorString()));
+        return;
+    }
     f.write(QJsonDocument(arr).toJson(QJsonDocument::Indented));
-    f.commit();
+    if (!f.commit()) {
+        Logger::instance().error(QStringLiteral(
+            "profiles: commit failed for %1 — changes are not persisted")
+            .arg(storagePath()));
+    }
 }
 
 void ProfileStore::upsert(const Profile& p) {

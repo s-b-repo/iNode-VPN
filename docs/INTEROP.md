@@ -36,16 +36,20 @@ From that capture, extract and diff against this client:
 
 ```bash
 # 1. capability probe + auth only (no root):
-python -m h3csvpn <gw> -u <user> -d <domain> --no-tunnel -vv --pin-sha256 <pin>
+./svpn-connect.sh --auth-only <gw> <user> <domain> -- -vv --pin-sha256 <pin>
+#    (equivalent: PYTHONPATH=backends python3 -m h3csvpn <gw> -u <user> -d <domain> --no-tunnel -vv --pin-sha256 <pin>)
 
 #    -> confirms TLS, version sentinel, gatewayinfo parse, login round-trip.
 #    If login fails with a credentials error but you KNOW they're right, your
-#    firmware may want RSA-encrypted passwords: re-try with --rsa-pubkey <key>.
+#    firmware may want RSA-encrypted passwords: re-try with -- --rsa-pubkey <key>.
 
-# 2. full tunnel (root):
-sudo H3C_SVPN_PASSWORD=... python -m h3csvpn <gw> -u <user> -d <domain> -vv --pin-sha256 <pin>
+# 2. full tunnel (root via pkexec/sudo, handled by the wrapper):
+./svpn-connect.sh <gw> <user> <domain> -- -vv --pin-sha256 <pin>
 #    -> creates inode0, programs IP/routes/DNS; ping an intranet host.
 ```
+
+Every message these commands can print is explained in
+[TROUBLESHOOTING.md §5–§7](TROUBLESHOOTING.md#5-ssl-vpn).
 
 ## 3. Known "validate-live" items (and safe defaults we ship)
 

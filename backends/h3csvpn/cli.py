@@ -5,14 +5,16 @@ import argparse
 import getpass
 import os
 import socket
+import ssl
 import sys
 
 from . import __version__
 from . import constants as C
 from .config import Settings, config_path
+from .httpclient import HTTPError
 from .session import SslVpnSession, Credentials, Options, AuthError
 from .transport import TLSConfig
-from .tunnel import Tunnel
+from .tunnel import Tunnel, TunnelClosed
 from . import vnic as vnic_mod
 
 
@@ -95,10 +97,18 @@ def _split_host(gateway: str, default_port: int) -> tuple[str, int]:
 
 
 def main(argv=None) -> int:
-    args = _build_parser().parse_args(argv)
-    host, port = _split_host(args.gateway, args.port)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    try:
+        host, port = _split_host(args.gateway, args.port)
+    except ValueError as exc:                      # ':443', 'gw:abc', ''
+        parser.error(f"invalid gateway: {exc}")
+    if len(args.ifname.encode("utf-8", "replace")) > 15:
+        parser.error("--ifname must be at most 15 bytes (Linux IFNAMSIZ)")
 
-    password = args.password or os.environ.get("H3C_SVPN_PASSWORD")
+    # An empty env var (or empty -p) must count as "unset", otherwise the
+    # prompt is skipped and a login with an empty password is attempted.
+    password = args.password or os.environ.get("H3C_SVPN_PASSWORD") or None
     if password is None and not args.dry_run:
         password = getpass.getpass("Password: ")
     creds = Credentials(username=args.user, password=password or "",
@@ -118,8 +128,12 @@ def main(argv=None) -> int:
 
     rsa = None
     if args.rsa_pubkey:
-        with open(args.rsa_pubkey, "rb") as f:
-            rsa = f.read()
+        try:
+            with open(args.rsa_pubkey, "rb") as f:
+                rsa = f.read()
+        except OSError as exc:
+            sys.stderr.write(f"[x] cannot read --rsa-pubkey: {exc}\n")
+            return 2
 
     tls = TLSConfig(
         verify=not args.insecure,
@@ -169,9 +183,9 @@ def main(argv=None) -> int:
             opts.zero_trust = SpaConfig(
                 aid=_unhex(os.environ.get("H3C_SPA_AID", "")),
                 client_key=_unhex(spa_key), ports=ports)
-            sys.stderr.write(f"[SPA] Zero-Trust knock enabled (ports={ports})\\n")
+            sys.stderr.write(f"[SPA] Zero-Trust knock enabled (ports={ports})\n")
         except (binascii.Error, ValueError) as exc:
-            sys.stderr.write(f"[x] invalid SPA env value: {exc}\\n")
+            sys.stderr.write(f"[x] invalid SPA env value: {exc}\n")
             return 2
 
     def log(msg: str) -> None:
@@ -184,8 +198,29 @@ def main(argv=None) -> int:
     except AuthError as exc:
         sys.stderr.write(f"[x] {exc}\n")
         return 2
+    except ssl.SSLCertVerificationError as exc:
+        sys.stderr.write(f"[x] protocol/TLS error: {exc}\n")
+        sys.stderr.write(
+            "    hint: the gateway certificate is not trusted by the system CA store "
+            "(self-signed, expired, or wrong hostname). Either pin it:\n"
+            f"      openssl s_client -connect {host}:{port} </dev/null 2>/dev/null "
+            "| openssl x509 -fingerprint -sha256 -noout\n"
+            "      ... then pass --pin-sha256 <fingerprint>  (GUI: profile > Fetch pin)\n"
+            "    or pass --cafile <ca.pem>. --insecure disables verification (unsafe).\n")
+        return 2
+    except (HTTPError, ssl.SSLError) as exc:
+        sys.stderr.write(f"[x] protocol/TLS error: {exc}\n")
+        return 2
     except OSError as exc:
         sys.stderr.write(f"[x] connection error: {exc}\n")
+        return 2
+    except RuntimeError as exc:                    # e.g. RSA mode without 'cryptography'
+        sys.stderr.write(f"[x] {exc}\n")
+        return 2
+    except (ValueError, SyntaxError) as exc:       # unreadable/unsafe gateway XML
+        sys.stderr.write(f"[x] gateway sent an unreadable response: {exc} "
+                         f"(is {host}:{port} really an H3C SSL VPN gateway? "
+                         "try -v to see the exchange)\n")
         return 2
 
     if args.no_tunnel:
@@ -195,8 +230,12 @@ def main(argv=None) -> int:
 
     try:
         tun, cfg = sess.open_tunnel()
-    except AuthError as exc:
+    except (AuthError, TunnelClosed, HTTPError, ssl.SSLError) as exc:
         sys.stderr.write(f"[x] tunnel setup failed: {exc}\n")
+        sess.logout()
+        return 3
+    except OSError as exc:
+        sys.stderr.write(f"[x] tunnel connection error: {exc}\n")
         sess.logout()
         return 3
 
@@ -205,6 +244,18 @@ def main(argv=None) -> int:
                          "TUN device. Re-run with sudo, or use --no-tunnel.\n")
         sess.logout()
         return 4
+    if not vnic_mod.have_ip_cmd():
+        sys.stderr.write("[x] the 'ip' command (iproute2) is required to configure "
+                         "the tunnel; install package 'iproute2' (Debian/Ubuntu/Arch) "
+                         "or 'iproute' (Fedora/openSUSE).\n")
+        sess.logout()
+        return 5
+    if not os.path.exists("/dev/net/tun"):
+        sys.stderr.write("[x] /dev/net/tun is missing: load the tun module "
+                         "(modprobe tun) or, in a container, start it with "
+                         "--device /dev/net/tun --cap-add NET_ADMIN.\n")
+        sess.logout()
+        return 5
 
     try:
         server_ip = socket.gethostbyname(host)
@@ -221,6 +272,24 @@ def main(argv=None) -> int:
         tun.run()
     except KeyboardInterrupt:
         print("\n[+] disconnecting...")
+    except TunnelClosed as exc:
+        # Includes the heartbeat dead-link path (the pump loop raises
+        # TunnelClosed after the heartbeat loop shuts the socket down) and a
+        # gateway-side close. Clean message + non-zero exit so the GUI's
+        # auto-reconnect treats it as a temporary failure.
+        sys.stderr.write(f"[x] connection lost: {exc}\n")
+        return 5
+    except (HTTPError, ssl.SSLError) as exc:
+        sys.stderr.write(f"[x] tunnel protocol error: {exc}\n")
+        return 5
+    except (RuntimeError, ValueError) as exc:
+        # e.g. full-tunnel without a gateway bypass (nic.configure), or an
+        # invalid netconfig — clean message instead of a traceback.
+        sys.stderr.write(f"[x] tunnel configuration error: {exc}\n")
+        return 5
+    except OSError as exc:
+        sys.stderr.write(f"[x] tunnel I/O error: {exc}\n")
+        return 5
     finally:
         tun.stop()
         nic.close()

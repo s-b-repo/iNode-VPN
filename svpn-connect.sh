@@ -62,7 +62,10 @@ PYARGS=( "$GW" -u "$USER_NAME" --auto-captcha -v )
 
 # ---- auth-only: run the backend directly, no privileges, no tunnel ----
 if [ "$AUTH_ONLY" -eq 1 ]; then
-    export PYTHONPATH="$BACKEND" PYTHONSAFEPATH=1 H3C_SVPN_PASSWORD="$PW"
+    # PYTHONDONTWRITEBYTECODE: a __pycache__ written here with umask 002 would
+    # make backends/ group-writable and the root helper would then refuse it.
+    export PYTHONPATH="$BACKEND" PYTHONSAFEPATH=1 PYTHONDONTWRITEBYTECODE=1 \
+           H3C_SVPN_PASSWORD="$PW"
     exec python3 -m h3csvpn "${PYARGS[@]}" --no-tunnel
 fi
 

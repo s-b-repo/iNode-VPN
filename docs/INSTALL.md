@@ -9,7 +9,13 @@ Three ways to install, pick one:
 | [3. Manual build](#3-manual-build) | optional | developers / custom prefixes |
 
 After installing, everything is verified for you by the built-in environment
-doctor (`--doctor`) — see [Verify](#5-verify-your-install).
+doctor (`--doctor`) — see [Verify](#6-verify-your-install). Already
+installed? Jump to [Updating](#4-updating).
+
+> **Requirements:** Linux, a C++20 compiler, CMake ≥ 3.22, Qt ≥ 6.4,
+> Python ≥ 3.9. `deploy.sh` installs all of these for you on Debian/Kali/
+> Ubuntu, Fedora, Arch and openSUSE. No display is needed to build or to run
+> `--doctor`, so it works over SSH.
 
 ---
 
@@ -37,15 +43,24 @@ cd iNode-VPN
 Useful flags:
 
 ```bash
-PREFIX=/opt/inode ./deploy.sh   # custom prefix (policy is still mirrored
-                                # to /usr/share so polkit finds it)
-./deploy.sh --build-only        # stop after compiling
+./deploy.sh --update            # git pull → rebuild → reinstall (see §4)
+./deploy.sh --build-only        # stop after compiling (binary in ./bin)
 ./deploy.sh --uninstall         # remove everything (user data in ~/.config kept)
 ./deploy.sh --doctor            # just print the environment report
+./deploy.sh --fix-perms         # re-tighten backends/ + scripts/ (portable mode)
+PREFIX=/opt/inode ./deploy.sh   # custom prefix (policy is still mirrored
+                                # to /usr/share so polkit finds it)
+JOBS=2 ./deploy.sh              # limit parallel compile jobs (low-RAM boxes)
+NO_DEPS=1 ./deploy.sh           # never touch the package manager
 ```
 
 > **Password prompt:** the install step needs root, so `deploy.sh` calls
-> `sudo` once for `cmake --install`. Building itself is done as your user.
+> `sudo` (or `doas`) once for `cmake --install`, and once more for the
+> package manager if build deps are missing. Building itself is done as your
+> user.
+
+> **Lost the exec bit?** (zip downloads sometimes do) — run `bash deploy.sh`
+> instead; it restores `+x` on every script it ships.
 
 ---
 
@@ -79,8 +94,9 @@ Run it:
 - The polkit policy is **not** registered in portable mode; `pkexec` will still
   work (it prompts as "run program"), you just don't get the friendly
   per-action descriptions. If you want them, do a system install later.
-- If you rebuilt the Python backend, re-run `chmod -R go-w backends` — the
-  root helper refuses to load a group/other-writable backend (see
+- The root helper refuses to load a group/other-writable backend tree.
+  `deploy.sh --local` tightens `backends/` and `scripts/` for you; if you
+  later edit or re-extract the sources, run `./deploy.sh --fix-perms` (see
   [Troubleshooting](#troubleshooting)).
 
 ---
@@ -89,8 +105,8 @@ Run it:
 
 ```bash
 # 1. Dependencies (Debian/Kali/Ubuntu example — per-distro table below)
-sudo apt install build-essential cmake qt6-base-dev python3 gnupg \
-                 tesseract-ocr polkitd pkexec
+sudo apt install build-essential cmake pkg-config qt6-base-dev python3 \
+                 libxcb-cursor0 tesseract-ocr polkitd pkexec
 
 # 2. Configure + build
 cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo \
@@ -112,10 +128,13 @@ cp build/iNodeClient-Qt bin/ && ./iNode-VPN.sh
 
 | Distro | Core (GUI build) | Extras (optional) |
 |---|---|---|
-| **Debian / Kali / Ubuntu** | `build-essential cmake qt6-base-dev python3 gnupg tesseract-ocr polkitd pkexec` | KDE: `libkf6wallet-dev libkf6config-dev libkf6i18n-dev libkf6coreaddons-dev` |
-| **Fedora** | `gcc-c++ cmake qt6-qtbase-devel python3 gnupg2 tesseract polkit` | KDE: `kf6-kwallet-devel kf6-kconfig-devel kf6-ki18n-devel kf6-kcoreaddons-devel` |
-| **Arch** | `base-devel cmake qt6-base python gnupg tesseract polkit` | KDE: `kwallet kconfig ki18n kcoreaddons` |
-| **openSUSE** | `gcc-c++ cmake qt6-base-devel python3 gpg2 tesseract polkit` | KDE: `kf6-kwallet-devel …` |
+| **Debian / Kali / Ubuntu** | `build-essential cmake pkg-config qt6-base-dev python3 libxcb-cursor0 tesseract-ocr polkitd pkexec` (Ubuntu ≤ 22.04: `policykit-1` instead of `polkitd pkexec`) | KDE: `libkf6wallet-dev libkf6config-dev libkf6i18n-dev libkf6coreaddons-dev`; translations: `qt6-tools-dev` |
+| **Fedora** | `gcc-c++ make cmake qt6-qtbase-devel python3 xcb-util-cursor tesseract polkit` | KDE: `kf6-kwallet-devel kf6-kconfig-devel kf6-ki18n-devel kf6-kcoreaddons-devel`; translations: `qt6-linguist` |
+| **Arch** | `base-devel cmake qt6-base python xcb-util-cursor tesseract polkit` | KDE: `kwallet kconfig ki18n kcoreaddons`; translations: `qt6-tools` |
+| **openSUSE** | `gcc-c++ make cmake qt6-base-devel python3 libxcb-cursor0 tesseract-ocr polkit` | KDE: `kf6-kwallet-devel …`; translations: `qt6-linguist-devel` |
+
+`deploy.sh` installs the first column unconditionally and the second column
+package-by-package, skipping anything your release doesn't ship.
 
 The Python SSL VPN backend needs **no packages at all** (stdlib only, Python
 3.9+). Optional hardening extras:
@@ -133,41 +152,57 @@ pip install backends/h3csvpn/[secure,rsa]     # defusedxml (hardened XML), crypt
 | 802.1X wired | `minieap` or `mentohust` | protocol unavailable |
 | WLAN 802.1X | NetworkManager (`nmcli`) | protocol unavailable |
 | L2TP/IPSec | `strongswan`, `xl2tpd`, `ppp` | protocol unavailable |
-| Credential storage | one of: KWallet, a Secret Service daemon (gnome-keyring/KeePassXC), **gpg**, libcrypto | falls back; with none, saving secrets is refused |
+| Credential storage | one of: KWallet, a Secret Service daemon (gnome-keyring/KeePassXC), libcrypto | falls back; with none, saving secrets is refused |
 
 ---
 
-## 4. Credential storage (GPG and friends)
+## 4. Updating
+
+```bash
+cd iNode-VPN
+./deploy.sh --update
+```
+
+This runs `git pull --ff-only`, rebuilds, and reinstalls in the **same mode
+you used before** — system if `/usr/libexec/iNodeClient-Qt` exists, portable
+otherwise. Your profiles and saved passwords (`~/.config/iNodeClient-Qt`,
+keyring entries) are never touched.
+
+- Installed from a **zip / release tarball** instead of git? Extract the new
+  version over the old folder, then run `./deploy.sh --update` (it skips the
+  pull and just rebuilds + reinstalls).
+- `git pull` refuses because of local edits? `git stash`, update, `git stash
+  pop`.
+- Moved or copied the folder (a stale `build/` from another path)? Nothing to
+  do — `deploy.sh` detects the mismatched CMake cache and starts a clean
+  build directory.
+- Upgrading from **v0.2** with saved passwords in the old GnuPG store: see
+  [Credential storage](#5-credential-storage) — migration is automatic.
+
+---
+
+## 5. Credential storage
 
 Saved passwords never touch disk in plaintext. The app picks the first
 available backend, in this order:
 
 1. **KWallet** — KDE, unlocked by your login (needs the KF6 build)
 2. **Secret Service** — gnome-keyring / KeePassXC / ksecretd
-3. **system GnuPG** — recommended if you already run a PGP keyring
-4. **AES-256-GCM file** — last resort, asks you to set a master password
+3. **AES-256-GCM file** — last resort, asks you to set a master password
 
-The active backend is shown by `--doctor`. To use **GPG**:
+The active backend is shown by `--doctor`.
 
-```bash
-gpg --full-gen-key            # once — if you don't have a key yet
-iNodeClient-Qt --doctor       # should now report: [ok] GnuPG — GPG (key XXXX…)
-```
-
-How the GPG backend works:
-
-- Credentials are sealed to your default **secret key** (`--trust-model always`).
-- The passphrase is handled entirely by **gpg-agent + pinentry** (GUI prompt);
-  this app never sees or stores it, and the agent caches the unlock like any
-  other GPG use.
-- No key yet or key deleted? It transparently falls back to **symmetric**
-  encryption (pinentry asks for a passphrase on first save).
-- On disk: a single 0600, atomically-replaced blob at
-  `~/.config/iNodeClient-Qt/secrets.gpg`.
+> **Removed in v0.3:** the **system GnuPG** backend (`secrets.gpg`) is gone.
+> A leftover store is migrated automatically: on first use the app decrypts
+> `~/.config/iNodeClient-Qt/secrets.gpg` (gpg-agent/pinentry handle the
+> passphrase, exactly as before), re-seals every entry into the active
+> backend and renames the file to `secrets.gpg.migrated`. If `gpg` is not
+> installed, the file is kept untouched and the app logs a note — install
+> `gnupg` once to let the migration run, or delete the file manually.
 
 ---
 
-## 5. Verify your install
+## 6. Verify your install
 
 ```bash
 iNodeClient-Qt --doctor        # system install — or:
@@ -185,7 +220,6 @@ Build / platform:
 
 Credential backends (in priority order):
   [ok] freedesktop Secret Service
-  [ok] GnuPG — GPG (key 7C1C4275…)
   [ok] AES-256-GCM file (libcrypto via dlopen)
   active: Secret Service (login keyring)
 
@@ -197,6 +231,7 @@ External tools:
 Privileged helpers + polkit:
   [ok] inode-svpn-helper
   ...
+  [ok] polkit action org.inode.ClientQt.* (/usr/share/polkit-1/actions)
 
 SSL VPN backend module:
   [ok] h3csvpn python package
@@ -210,23 +245,67 @@ L2TP, …). The things that must be `ok` for your use case:
   h3csvpn module.
 - **Saving passwords:** any one credential backend `ok`.
 
+The polkit line is expected to be `MISSING` in portable mode (nothing is
+registered system-wide); `pkexec` still works, it just prompts generically.
+
 ---
 
 ## Troubleshooting
 
+The full catalogue — every message from `deploy.sh`, the helpers, the GUI and
+the SSL VPN backend, with the fix — is **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)**.
+The install-time problems you are most likely to meet:
+
+### Build fails: "The source directory … does not match the source used to generate cache"
+
+A `build/` directory was copied along with the sources (zip snapshot, moved
+checkout) and its CMake cache points at the old path. `deploy.sh` detects
+this and wipes `build/` automatically; for a manual build do `rm -rf build`
+and configure again.
+
+### "This application failed to start because no Qt platform plugin could be initialized"
+
+- On an **X11** desktop: install `libxcb-cursor0` (Debian/Ubuntu/Kali),
+  `xcb-util-cursor` (Fedora/Arch) — required by Qt ≥ 6.5's xcb plugin. The
+  one-command installer pulls it in for you.
+- Over **SSH / headless**: `--doctor`, `--version`, `--help` and
+  `--list-profiles` switch to the offscreen platform automatically. The GUI
+  itself needs a display; forward one (`ssh -X`) or run it in your session.
+
+### "Permission denied" while building, or chmod errors from deploy.sh
+
+Almost always leftovers from running `sudo ./deploy.sh` once: `build/` and
+`bin/` are then owned by root and every later run as your user fails.
+`deploy.sh` now detects files in `build/`, `bin/`, `backends/` or
+`scripts/` that you don't own and offers to `chown` them back (one sudo
+prompt). Don't run the script with `sudo` — it asks for root only for the
+install step. To fix by hand:
+
+```bash
+sudo chown -R "$(id -un)" .        # inside the iNode-VPN folder
+./deploy.sh --fix-perms
+```
+
+A folder that isn't writable by you at all (extracted by root into
+`/opt`, a read-only mount) is reported up front with the same fix.
+
 ### "backend is group/other-writable; refusing to load it as root"
 
 The root helper refuses to import Python from `backends/h3csvpn` if any file
-there is group/other-writable (so a malicious module can't be swapped in).
-Common right after unzipping/rebuilding with `umask 002`:
+or directory there is group/other-writable (so a malicious module can't be
+swapped in). Common after unzipping/rebuilding with `umask 002`, or when a
+`__pycache__` was written into the tree:
 
 ```bash
-chmod -R go-w backends
-find backends -type d -exec chmod 755 {} \;
+./deploy.sh --fix-perms                    # removes __pycache__, chmod -R go-w
 find backends/h3csvpn -perm /022 -print    # must print nothing
 ```
 
-Re-run after every rebuild/re-extract (or set `umask 022` in your shell rc).
+`deploy.sh` does this on every build (all modes) and forces `umask 022` for
+everything it creates, so a fresh `git clone` on a system whose default
+umask is `002` (Debian/Kali user-private groups) works without manual
+chmod. System installs are unaffected — CMake installs the backend copy
+root-owned with 644/755 regardless of the source tree's permissions.
 
 ### pkexec prompts don't appear / "sudo: a password is required"
 
@@ -242,14 +321,16 @@ Re-run after every rebuild/re-extract (or set `umask 022` in your shell rc).
   ```
 
 - GUI asks for root on *connect* even though it's installed: check
-  `--doctor` shows the polkit action as `ok`.
+  `--doctor` shows the polkit action as `ok`. polkit only scans
+  `/usr/share/polkit-1/actions` — a policy under `/usr/local/share` is
+  ignored; `./deploy.sh` mirrors it into the right place.
 
 ### "No stored password for profile."
 
 The GUI doesn't prompt for the password at connect time — it reads it from the
 credential backend. Edit the profile, enter the password, tick **store
-password**, save. (First save may trigger a pinentry/master-password prompt —
-see [Credential storage](#4-credential-storage-gpg-and-friends).)
+password**, save. (With no keyring daemon, the first save asks you to set a
+master password — see [Credential storage](#5-credential-storage).)
 
 ### Login fails server-side
 
@@ -268,3 +349,6 @@ concurrent-login cap is hit. Test auth-only first:
 ./deploy.sh --uninstall     # removes binary, helpers, policy, menu entry
 rm -rf ~/.config/iNodeClient-Qt   # optional: user data (profiles, secrets)
 ```
+
+Anything else — connection errors, CAPTCHA, tunnel/DNS, 802.1X, L2TP, Portal —
+is in [TROUBLESHOOTING.md](TROUBLESHOOTING.md).

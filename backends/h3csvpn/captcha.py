@@ -32,6 +32,14 @@ WHITE_CUTOFF = 200           # a pixel with all channels > this is "background"
 MIN_BLOB = 6                 # connected components smaller than this px = speckle
 WHITELIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
+# The gateway image is ~200x60. Real captchas never come close to these caps;
+# they exist so a hostile/compromised gateway cannot OOM the client: a 16 MB
+# "BMP" can declare ~2350x2350 dimensions, which decodes into ~400 MB of
+# Python pixel tuples (~25x amplification) before any of the analysis grids
+# are allocated.
+MAX_PIXELS = 1_000_000
+MAX_DIM = 4096
+
 
 # --------------------------------------------------------------------------
 # BMP decoding (pure stdlib)
@@ -45,12 +53,18 @@ def decode_bmp(data: bytes) -> Tuple[int, int, List[List[Pixel]]]:
     dib = struct.unpack_from("<I", data, 14)[0]
     width = struct.unpack_from("<i", data, 18)[0]
     height = struct.unpack_from("<i", data, 22)[0]
+    top_down = height < 0
+    h = abs(height)
+    # Fail on hostile dimensions BEFORE anything else is parsed or decoded.
+    if width <= 0 or h <= 0 or width > MAX_DIM or h > MAX_DIM:
+        raise ValueError(f"implausible BMP dimensions {width}x{h}")
+    if width * h > MAX_PIXELS:
+        raise ValueError(f"BMP too large: {width}x{h} "
+                         f"({width * h} px > cap {MAX_PIXELS})")
     bpp = struct.unpack_from("<H", data, 28)[0]
     compression = struct.unpack_from("<I", data, 30)[0]
     if compression not in (0,):
         raise ValueError(f"unsupported BMP compression {compression}")
-    top_down = height < 0
-    h = abs(height)
 
     palette: List[Pixel] = []
     if bpp <= 8:

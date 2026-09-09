@@ -291,12 +291,16 @@ bool isUnlocked() { return session().unlocked; }
 
 bool hasAnyStoredEntry() {
     if (!QFileInfo::exists(filePath())) return false;
-    // Any child key under [entries] counts. QSettings::childKeys() at the
-    // group level gives us the entry names directly.
-    file().beginGroup(QStringLiteral("entries"));
-    const bool any = !file().childKeys().isEmpty();
-    file().endGroup();
-    return any;
+    // Entry keys are written as "entries/<uuid>/<field>", so each profile
+    // UUID lands in a subgroup of [entries] — childKeys() would only see
+    // immediate keys and always come back empty. Filter allKeys() instead.
+    const QList<QString> keys = file().allKeys();
+    for (const QString& k : keys) {
+        if (k.startsWith(QStringLiteral("entries/")) &&
+            k != QStringLiteral("entries/"))
+            return true;
+    }
+    return false;
 }
 
 bool unlock() {

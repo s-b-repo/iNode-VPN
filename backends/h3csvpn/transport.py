@@ -9,6 +9,7 @@ client and noted as a limitation.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import socket
 import ssl
 from dataclasses import dataclass
@@ -91,7 +92,7 @@ def tls_connect(host: str, port: int = C.DEFAULT_PORT,
             der = sock.getpeercert(binary_form=True) or b""
             got = hashlib.sha256(der).hexdigest()
             want = _normalize_pin(cfg.pin_sha256)
-            if got != want:
+            if not hmac.compare_digest(got, want):
                 raise TLSPinError(
                     f"certificate pin mismatch: peer={got} expected={want}")
     except Exception:

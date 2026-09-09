@@ -31,7 +31,31 @@ class Settings:
         except (OSError, ValueError):
             return cls()
         known = {f for f in cls().__dict__}
-        return cls(**{k: v for k, v in data.items() if k in known})
+        s = cls(**{k: v for k, v in data.items() if k in known})
+        s._coerce()
+        return s
+
+    def _coerce(self) -> None:
+        """A hand-edited config must not produce a TypeError later (e.g.
+        max(1, "8")). Coerce every field to its declared type."""
+        self.auto_captcha = self._as_bool(self.auto_captcha, True)
+        self.show_captcha = self._as_bool(self.show_captcha, True)
+        try:
+            self.captcha_retries = int(self.captcha_retries)
+        except (TypeError, ValueError):
+            self.captcha_retries = 8
+        self.captcha_retries = max(1, self.captcha_retries)
+
+    @staticmethod
+    def _as_bool(v, default: bool) -> bool:
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            return v.strip().lower() in ("1", "true", "yes", "on")
+        try:
+            return bool(int(v))
+        except (TypeError, ValueError):
+            return default
 
     def save(self) -> None:
         path = config_path()

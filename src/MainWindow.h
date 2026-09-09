@@ -19,6 +19,7 @@ class TrayIcon;
 class ConnectionPanel;
 class AutoReconnect;
 class LogFile;
+class ControlServer;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -56,6 +57,12 @@ private:
     const Profile* selectedProfile() const;
     void destroyActiveSoon();
     void persistPassword(const ProfileEditor& dlg);
+    // --status / --disconnect / --connect from a second process arrive here.
+    QString handleControlCommand(const QString& command);
+    // Make sure a password exists for the profile before a protocol that
+    // needs one starts: ask the user when nothing is stored. Returns false
+    // if the user cancelled.
+    bool ensurePasswordAvailable(const Profile& p);
     static bool isPermanentError(const QString& msg);
 
     QString m_lastError;   // last errorOccurred message (drives reconnect policy)
@@ -76,6 +83,7 @@ private:
     TrayIcon*    m_tray       = nullptr;
     AutoReconnect* m_reconnect = nullptr;
     LogFile*     m_logFile    = nullptr;
+    ControlServer* m_control  = nullptr;
 };
 
 } // namespace inode

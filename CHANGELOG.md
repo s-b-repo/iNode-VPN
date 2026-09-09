@@ -3,6 +3,188 @@
 All notable changes to the iNode Client (Qt edition) are documented here.
 This project loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.3.0] — 2026-09-09
+
+Bug-fix, hardening and resource-usage release; GPG credential backend removed.
+
+### Documentation
+- New **docs/TROUBLESHOOTING.md**: every message `deploy.sh`, the privileged
+  helpers, the GUI and the SSL VPN backend can produce, with cause and fix,
+  organised by stage (install → launch → credentials → polkit → SSL VPN →
+  CAPTCHA → tunnel/DNS → 802.1X/WLAN → L2TP → Portal/EAD/SDP → reconnect/UI
+  → update → logs & files). README, INSTALL, USAGE, PROTOCOLS and INTEROP
+  link into it; the backend README's dead links (docs/mock/tests that are
+  not shipped) are fixed and it documents the exit codes.
+
+### Fixed (error reporting — so the fixes above are reachable)
+- Backend: a bad gateway string (`:443`, `gw:abc`, empty) and an over-long
+  `--ifname` are usage errors (exit 2) instead of tracebacks; a certificate
+  verification failure prints the exact `openssl` pin command and the
+  `--pin-sha256`/`--cafile` fix; `--rsa-pubkey` without `cryptography` or
+  an unreadable key file exits 2 cleanly; unreadable/unsafe gateway XML is
+  reported as "gateway sent an unreadable response" (exit 2); a missing
+  `ip` command or `/dev/net/tun` is named with the package/modprobe fix
+  (exit 5) instead of a raw errno; a non-interactive 2FA prompt says so;
+  a failed `resolv.conf` backup says DNS was left unchanged.
+- GUI: L2TP/IPSec bring-up failure, an 802.1X rejection or early supplicant
+  exit, and a failed Wi-Fi association now emit a message (they set
+  *Failed* silently before). The auto-reconnect "permanent error" heuristic
+  also recognises gateway verdicts (`auth rejected`, `login rejected`,
+  `posture rejected`), missing tools/helpers, privilege denials and the
+  SSL VPN exit-2 fallback, so those no longer burn the retry budget.
+
+### Fixed (GUI)
+- **`--status` did nothing and `--disconnect` never reached the running
+  client**: `--status` was parsed but unhandled (it just opened a second
+  window) and `--disconnect` ran in a fresh process with nothing to
+  disconnect. A per-user local control socket (`$XDG_RUNTIME_DIR/
+  iNodeClient-Qt-<uid>.sock`, mode 0700) now links a running instance and
+  later invocations: `--status` prints `<state>\t<profile>[\t<iface ip>]`
+  (exit 0 connected, 2 idle, 3 not running), `--disconnect` tears the
+  session down (exit 3 if nothing runs), `--connect <name>` is forwarded to
+  the running instance, and a plain second launch raises the existing window
+  instead of starting a duplicate. Both flags work headless.
+- **"No stored password for profile."** on the first connect: new profiles
+  had *Store password* unticked, so a typed password was silently dropped
+  and every protocol that needs one refused to start. New profiles now
+  store by default; a password typed with the box unticked is kept for the
+  session; and whenever nothing is stored the GUI **asks at connect time**
+  (with a *Remember* option) instead of failing. A keyring that refuses to
+  store now produces a visible warning instead of nothing.
+- `CredentialStore` gained a session-only in-memory overlay (never written
+  to disk) that `retrieve()` consults first; `store()` logs its failures.
+
+### Fixed (build / install)
+- **Fresh `git clone` on umask 002 systems** (Debian/Kali user-private
+  groups) left every file in `backends/h3csvpn` group-writable, so the root
+  helper refused all SSL VPN connects in portable mode ("backend is
+  group/other-writable"). `deploy.sh` now runs with `umask 022`, tightens
+  `backends/` + `scripts/` on every build and verifies the result; CMake
+  installs the backend copy with explicit 644/755 permissions.
+- Root-owned leftovers from a one-time `sudo ./deploy.sh` (`build/`,
+  `bin/`) made every later user run fail with "Permission denied";
+  `deploy.sh` detects foreign-owned files and chowns them back (one sudo
+  prompt), warns when itself run via sudo and hands `build/`/`bin/` back to
+  the invoking user, and refuses up front on a non-writable checkout with
+  the exact fix.
+- **Build was broken**: `CredentialStore::ensureLegacyMigration()` was declared
+  `static` but called a non-static member — every fresh checkout failed to
+  compile. (The GPG-store migration is now a plain member function.)
+- `--doctor`, `--version`, `--help` and `--list-profiles` aborted with
+  "no Qt platform plugin could be initialized" on a headless box / over SSH
+  (the last step of `deploy.sh` crashed in a TTY). Text-only entry points
+  now fall back to the offscreen platform when no display is reachable.
+- Version string is taken from CMake (`INODE_VERSION`) — `--version` printed
+  0.2.0 while the docs already described v0.3.
+- Portable mode: the root helper refused every SSL VPN connect on trees
+  checked out with `umask 002` or after any user-side `python3 -m h3csvpn`
+  run left a group-writable `__pycache__` behind. `deploy.sh --local` now
+  tightens `backends/` + `scripts/` (new `--fix-perms` too), the CLI wrapper
+  no longer writes bytecode into the tree, and the helper's refusal message
+  names the fix.
+- `--doctor` reported the polkit action as `ok` for a policy under
+  `/usr/local/share`, which polkit never scans; it now checks the canonical
+  `/usr/share/polkit-1/actions` and prints what to do.
+
+### Added (deploy.sh)
+- `--update`: `git pull --ff-only` → rebuild → reinstall in the same mode as
+  before (system or portable). Zip installs skip the pull and just rebuild.
+- Build-dependency detection in one pass (compiler, make, CMake, Qt6 dev via
+  qmake6 / pkg-config / `Qt6Config.cmake`, python3); only then is the package
+  manager invoked. `NO_DEPS=1` opts out, `JOBS=n` bounds parallelism.
+- Optional packages (KF6 dev, tesseract, polkit, `libxcb-cursor0`, Qt
+  linguist) are installed one by one — a renamed or missing optional no
+  longer aborts the whole dependency step (`polkitd` vs `policykit-1`).
+- Stale `build/CMakeCache.txt` from a moved/copied checkout is detected and
+  the build dir recreated instead of CMake refusing to configure.
+- `--help`, `doas` fallback, cache refresh on uninstall, PATH hint after a
+  custom-PREFIX install; `iNode-VPN.sh` explains how to build when run before
+  `deploy.sh --local`.
+
+### Removed
+- **System-GnuPG credential backend** (`GpgFileStore`): removed to cut attack
+  surface (a `gpg` subprocess per operation and a second on-disk copy of every
+  secret). A leftover `~/.config/iNodeClient-Qt/secrets.gpg` is transparently
+  migrated on first use — decrypted once via gpg-agent/pinentry (the app still
+  never sees the passphrase), re-sealed into the active backend, and renamed
+  `secrets.gpg.migrated`. KWallet / Secret Service / AES-256-GCM-file
+  backends are unchanged.
+
+### Fixed (C++ / GUI)
+- **High**: SSL VPN profiles with an SDP/SPA key crashed with a null-pointer
+  dereference (`m_proc` used before creation); the SPA env is now applied to
+  the process after construction.
+- **High**: 802.1X never connected — `--stdin-password` was passed to the raw
+  supplicant instead of the allow-listed `inode-dot1x-helper` (unknown flag →
+  immediate exit, and pkexec policy mismatch). All launches now route through
+  the helper.
+- **High**: the AES-256-GCM fallback credential store could never be read
+  back (`hasAnyStoredEntry()` inspected child *keys* while entries are child
+  *groups* — always false → stored passwords silently unreadable).
+- 802.1X "success" no longer blocks the GUI for up to 30 s: IP configuration
+  (pkexec static config / DHCP renew) runs asynchronously; the DHCP timeout
+  no longer reports success.
+- L2TP/IPSec bring-up/teardown no longer freeze the GUI for up to 120 s:
+  the helper runs asynchronously with a bounded watchdog; shutdown uses a
+  detached `down` invocation instead of blocking the destructor.
+- SSL VPN disconnect/teardown no longer blocks the GUI for up to 25 s
+  (stop-helper is detached; a 5 s safety timer escalates SIGINT → kill).
+- "Fetch pin" no longer routes user text through `bash -c` (command
+  injection via a pasted gateway URL) — two piped `openssl` processes
+  instead, run asynchronously.
+- Wi-Fi passwords are no longer visible in `ps`: `nmcli --ask` reads the
+  password from stdin instead of argv.
+- Portal v2: REQ_AUTH now echoes the **server-assigned ReqId** from
+  ACK_CHALLENGE (offset 6) instead of a locally invented counter — the
+  standard dialect previously failed against real iMC/EIA servers. Attribute
+  values are clamped to the 253-byte TLV limit; a 10 s watchdog fails
+  cleanly when the server never answers; the plaintext password is dropped
+  from memory once the session is up.
+- Portal/EAD: asynchronous DNS (sync `QHostInfo::fromName()` on every send,
+  heartbeats included, used to freeze the GUI); EAD arms its retransmit
+  timer during resolution so a slow resolver can't wedge the protocol.
+- The queued `m_active.reset()` in `MainWindow` can no longer destroy a
+  freshly started connection racing an old session's late `Disconnected`.
+- KWallet object leak on wallet reopen; uptime timer now ticks only while
+  connected; portal-secret/SPA-key fields are password-masked; failed
+  profile/log writes are logged instead of silently dropped; DHCP gateway
+  tie-breaking prefers the kernel's (first) route.
+
+### Fixed (Python SSL VPN backend)
+- **High**: `_read_tunnel_preamble` busy-spun at 100 % CPU for the full
+  deadline when the gateway closed the tunnel socket mid-handshake (EOF is
+  permanently select()-readable) — EOF now raises `TunnelClosed`.
+- **High**: a negative `Content-Length` desynchronized the reused
+  auth-connection stream (buffer sliced with negative indices); missing
+  Content-Length on non-204/304 responses is now an explicit error instead
+  of a `ValueError` traceback.
+- **High**: gateway-supplied BMP dimensions were trusted unconditionally —
+  a 16 MB "captcha" decoded into ~400 MB of pixel tuples (OOM). Dimensions
+  are now capped (≤ 4096 px, ≤ 1 M px total).
+- Control and tunnel TLS sockets are closed on every failure path and at
+  teardown (`Connection.close()`, try/finally in `authenticate()` /
+  `open_tunnel()`); `Tunnel.stop()` joins the heartbeat thread and closes
+  the socket (previously one live thread + fd leaked per tunnel session).
+- Backend exceptions (`TunnelClosed`, `HTTPError`, `ssl.SSLError`) no longer
+  escape as tracebacks: clean message, server-side logout attempted, proper
+  exit codes for the GUI's auto-reconnect.
+- Data pump: `SSLSocket.pending()` is drained before `select()` (a buffered
+  TLS record used to idle the pump in 1 s ticks), socket timeout shortened
+  (a partial record blocked the pump for up to 30 s), TUN writes checked.
+- `resolv.conf` handling resolves symlinks (systemd-resolved systems kept
+  their link intact now), validates DNS literals (no empty resolv.conf), and
+  `ip route del` removes exactly the routes that were added.
+- Full-tunnel mode refuses to start without a gateway bypass (previously
+  hung the tunnel by routing its own TLS traffic into the TUN).
+- Empty `H3C_SVPN_PASSWORD` no longer silently disables the password prompt;
+  SPA knock rejects degenerate port lists; settings file type coercion;
+  XML attribute values escape quotes; cert-pin compare is constant-time;
+  HTTP 308 counted as a redirect.
+- Shell helpers: `inode-l2tp-helper` chap-secrets matching is field-exact
+  (a `.*` username previously deleted **all** entries as root) with trap
+  rollback on failed bring-up; `inode-ipcfg-helper` refuses to install an
+  empty `resolv.conf` and resolves symlinks.
+
 ## [Unreleased] — 2026-08-31
 
 Deployment, security-hardening and documentation release.

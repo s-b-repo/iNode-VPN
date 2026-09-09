@@ -3,6 +3,10 @@
 #include "core/Profile.h"
 #include "core/Protocol.h"
 
+#include <QHostAddress>
+
+#include <functional>
+
 class QUdpSocket;
 class QTimer;
 
@@ -61,6 +65,11 @@ private:
     QByteArray buildPacket(quint16 opcode, const QByteArray& body);
     QByteArray buildPostureXml() const;
     void transmit(const QByteArray& pkt);
+    // Resolve the posture server asynchronously (a sync QHostInfo::fromName()
+    // on every transmit used to freeze the GUI for the DNS timeout) and run
+    // `then` once the address is known. On resolution failure the protocol
+    // transitions to Failed instead of hanging.
+    void resolveServer(std::function<void()> then);
 
     QUdpSocket* m_sock      = nullptr;
     QTimer*     m_heartbeat = nullptr;
@@ -75,6 +84,8 @@ private:
     Step        m_step      = Step::Idle;
     int         m_retries   = 0;
     QByteArray  m_lastPkt;      // for retransmit
+    QHostAddress m_addr;        // resolved server address
+    bool        m_resolving = false;
 };
 
 } // namespace inode

@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 
 #include "core/AutoReconnect.h"
+#include "core/ControlChannel.h"
 #include "core/CredentialStore.h"
 #include "core/CustomXmlImporter.h"
 #include "core/Dhcp.h"
@@ -18,8 +19,13 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QCheckBox>
 #include <QCloseEvent>
 #include <QColor>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QFormLayout>
+#include <QLineEdit>
 #include <QFileDialog>
 #include <QFont>
 #include <QHBoxLayout>
@@ -35,6 +41,7 @@
 #include <QSplitter>
 #include <QStatusBar>
 #include <QStyle>
+#include <QTimer>
 #include <QVBoxLayout>
 
 namespace inode {
@@ -112,6 +119,13 @@ MainWindow::MainWindow(ProfileStore* store, QWidget* parent)
         }
         statusBar()->addPermanentWidget(label);
     }
+
+    // Control socket for `iNodeClient-Qt --status / --disconnect / --connect`
+    // issued from another terminal while this instance runs.
+    m_control = new ControlServer([this](const QString& cmd) {
+        return handleControlCommand(cmd);
+    }, this);
+    m_control->listen();
 
     // Optional file logger
     m_logFile = new LogFile(this);
@@ -264,9 +278,18 @@ void MainWindow::refreshList() {
 
 bool MainWindow::isPermanentError(const QString& msg) {
     static const char* kPermanent[] = {
-        "certificate", "pin mismatch", "authentication failed", "captcha",
-        "no stored password", "username is required", "no gateway",
-        "not implemented", "unsupported", "is required",
+        // TLS / trust
+        "certificate", "pin mismatch",
+        // credentials / gateway verdicts
+        "authentication failed", "auth rejected", "login rejected",
+        "posture rejected", "check username", "captcha",
+        // profile problems — retrying cannot fix these
+        "no stored password", "username is required", "is required",
+        "requires", "no gateway", "no interface", "not implemented",
+        "unsupported", "not supported",
+        // missing pieces / privileges
+        "not found", "not installed", "need root", "needs root",
+        "could not gain privileges", "is not available",
     };
     const QString m = msg.toLower();
     for (const char* k : kPermanent)
@@ -344,12 +367,127 @@ void MainWindow::persistPassword(const ProfileEditor& dlg) {
     // left behind in the credential store. When it is on, only overwrite if the
     // user actually typed something (an empty field on edit means "unchanged").
     const Profile saved = dlg.profile();
+    auto& cs = CredentialStore::instance();
     if (saved.savePassword) {
-        if (!dlg.password().isEmpty())
-            CredentialStore::instance().store(saved.id, dlg.password());
+        if (dlg.password().isEmpty()) return;
+        if (cs.store(saved.id, dlg.password())) return;
+        // Storing failed (keyring locked/refused, no backend). Don't lose what
+        // the user typed: keep it for this session and say so.
+        cs.setSessionSecret(saved.id, dlg.password());
+        QMessageBox::warning(this, tr("Password not saved"),
+            tr("The password could not be stored in %1.\n\n"
+               "It will be used for this session only; you will be asked for it "
+               "again next time. Run 'iNodeClient-Qt --doctor' to check the "
+               "credential backends.").arg(cs.backendDescription()));
     } else {
-        CredentialStore::instance().forget(saved.id);
+        cs.forget(saved.id);
+        // Not stored — but if the user typed one just now, use it for this
+        // session instead of failing the very next Connect.
+        if (!dlg.password().isEmpty()) cs.setSessionSecret(saved.id, dlg.password());
     }
+}
+
+QString MainWindow::handleControlCommand(const QString& command) {
+    const QString cmd = command.section(QLatin1Char(' '), 0, 0);
+    const QString arg = command.section(QLatin1Char(' '), 1).trimmed();
+    if (cmd == QLatin1String("status")) {
+        if (!m_active) return QStringLiteral("disconnected");
+        const QString state = stateName(m_active->state()).toLower();
+        const auto stats = m_active->stats();
+        QString line = state + QLatin1Char('\t') + m_activeProfile.name;
+        if (m_active->state() == ConnectionState::Connected && !stats.iface.isEmpty())
+            line += QLatin1Char('\t') + stats.iface
+                  + (stats.localIp.isEmpty() ? QString() : QLatin1Char(' ') + stats.localIp);
+        return line;
+    }
+    if (cmd == QLatin1String("disconnect")) {
+        if (!m_active || m_active->state() == ConnectionState::Disconnected)
+            return QStringLiteral("not connected");
+        Logger::instance().info(tr("disconnect requested from the command line"));
+        disconnectActive();
+        return QStringLiteral("disconnecting %1").arg(m_activeProfile.name);
+    }
+    if (cmd == QLatin1String("connect")) {
+        const auto* p = m_store->findByName(arg);
+        if (!p) return QStringLiteral("error: no profile named '%1'").arg(arg);
+        if (m_active && m_active->state() == ConnectionState::Connected)
+            return QStringLiteral("error: already connected to %1 — disconnect first")
+                       .arg(m_activeProfile.name);
+        Logger::instance().info(tr("connect '%1' requested from the command line").arg(p->name));
+        const Profile copy = *p;
+        QTimer::singleShot(0, this, [this, copy] { connectByProfile(copy); });
+        return QStringLiteral("connecting %1").arg(copy.name);
+    }
+    if (cmd == QLatin1String("show")) {
+        showNormal(); raise(); activateWindow();
+        return QStringLiteral("ok");
+    }
+    return QStringLiteral("error: unknown command '%1'").arg(cmd);
+}
+
+bool MainWindow::ensurePasswordAvailable(const Profile& p) {
+    switch (p.kind) {
+        case ProtocolKind::SslVpn:
+        case ProtocolKind::Dot1x:
+        case ProtocolKind::Portal:
+        case ProtocolKind::L2tpIpsec:
+            break;                       // these refuse to start without one
+        default:
+            return true;                 // WLAN (open networks), EAD, SDP: optional
+    }
+    auto& cs = CredentialStore::instance();
+    QString existing;
+    if (cs.retrieve(p.id, &existing) && !existing.isEmpty()) return true;
+
+    // Nothing stored: ask now instead of failing with
+    // "No stored password for profile."
+    QDialog dlg(this);
+    dlg.setWindowTitle(tr("Password for '%1'").arg(p.name));
+    auto* form = new QFormLayout(&dlg);
+    auto* info = new QLabel(tr("No password is stored for this profile.\n"
+                               "Enter it to connect%1.")
+                                .arg(p.username.isEmpty() ? QString()
+                                                          : tr(" as %1").arg(p.username)), &dlg);
+    info->setWordWrap(true);
+    form->addRow(info);
+    auto* edit = new QLineEdit(&dlg);
+    edit->setEchoMode(QLineEdit::Password);
+    form->addRow(tr("Password:"), edit);
+    auto* remember = new QCheckBox(tr("Remember (encrypted in %1)").arg(cs.backendDescription()), &dlg);
+    remember->setEnabled(cs.isSecureBackend());
+    remember->setChecked(cs.isSecureBackend());
+    form->addRow(QString(), remember);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    buttons->button(QDialogButtonBox::Ok)->setText(tr("Connect"));
+    buttons->button(QDialogButtonBox::Ok)->setEnabled(false);
+    connect(edit, &QLineEdit::textChanged, buttons, [buttons](const QString& t) {
+        buttons->button(QDialogButtonBox::Ok)->setEnabled(!t.isEmpty());
+    });
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    form->addRow(buttons);
+    edit->setFocus();
+
+    if (dlg.exec() != QDialog::Accepted || edit->text().isEmpty()) {
+        Logger::instance().info(tr("connect cancelled — no password entered for '%1'").arg(p.name));
+        return false;
+    }
+
+    const QString pw = edit->text();
+    if (remember->isChecked() && cs.store(p.id, pw)) {
+        // Reflect the choice in the profile so the editor shows it ticked.
+        if (auto* stored = m_store->find(p.id); stored && !stored->savePassword) {
+            Profile updated = *stored;
+            updated.savePassword = true;
+            m_store->upsert(updated);
+        }
+    } else {
+        if (remember->isChecked())
+            Logger::instance().warn(tr("could not store the password in %1 — using it for this session only")
+                                        .arg(cs.backendDescription()));
+        cs.setSessionSecret(p.id, pw);
+    }
+    return true;
 }
 
 void MainWindow::onRemoveProfile() {
@@ -391,6 +529,10 @@ void MainWindow::onConnect() {
 
 void MainWindow::connectByProfile(const Profile& p) {
     if (m_active && m_active->state() == ConnectionState::Connected) return;
+
+    // Ask for a missing password up front (modal), before any protocol object
+    // or reconnect timer exists, so a cancel is a clean no-op.
+    if (!ensurePasswordAvailable(p)) return;
 
     m_active = ProtocolFactory::create(p.kind, this);
     if (!m_active) {
@@ -448,7 +590,13 @@ void MainWindow::onDhcpRenew() {
         return;
     }
     Logger::instance().info(tr("DHCP renew requested on %1").arg(iface));
-    dhcp::renew(iface);
+    // Asynchronous: dhclient release+bind can take up to ~30 s and a pkexec
+    // prompt may appear — none of that may block the GUI thread.
+    dhcp::renewAsync(iface, [this, iface](bool ok) {
+        if (!ok)
+            QMessageBox::warning(this, tr("Renew DHCP"),
+                tr("DHCP renew on %1 could not be started.").arg(iface));
+    });
 }
 
 void MainWindow::onShowSettings() {
@@ -513,7 +661,14 @@ void MainWindow::onStateChanged(ConnectionState state) {
 }
 
 void MainWindow::destroyActiveSoon() {
-    QMetaObject::invokeMethod(this, [this] { m_active.reset(); }, Qt::QueuedConnection);
+    // Destroy only the object that reported the terminal state. A queued
+    // reset racing a fresh connectByProfile() (e.g. Portal emits Disconnected
+    // ~1 s after the click, right as a new connect starts) must not tear down
+    // the NEW session object.
+    auto* stale = m_active.get();
+    QMetaObject::invokeMethod(this, [this, stale] {
+        if (m_active.get() == stale) m_active.reset();
+    }, Qt::QueuedConnection);
 }
 
 void MainWindow::onStatsUpdated(const ConnectionStats& stats) {

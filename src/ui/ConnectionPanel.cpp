@@ -122,7 +122,10 @@ ConnectionPanel::ConnectionPanel(QWidget* parent) : QWidget(parent) {
     auto* t = new QTimer(this);
     t->setInterval(1000);
     connect(t, &QTimer::timeout, this, &ConnectionPanel::refreshUptime);
-    t->start();
+    // Left stopped here: setState(Connected) starts it, setState(anything
+    // else) stops it — an always-running 1 s timer just burns wakeups while
+    // the app sits idle in the tray.
+    m_uptimeTimer = t;
 }
 
 void ConnectionPanel::setState(ConnectionState state, const QString& profileName) {
@@ -153,7 +156,9 @@ void ConnectionPanel::setState(ConnectionState state, const QString& profileName
 
     if (state == ConnectionState::Connected) {
         if (!m_connectedAt.isValid()) m_connectedAt = QDateTime::currentDateTime();
+        if (m_uptimeTimer) m_uptimeTimer->start();
     } else {
+        if (m_uptimeTimer) m_uptimeTimer->stop();
         m_connectedAt = QDateTime();
         m_lastRx = m_lastTx = -1;
         m_spark->reset();

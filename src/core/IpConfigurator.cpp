@@ -9,6 +9,7 @@
 #include <QProcess>
 #include <QStandardPaths>
 #include <QStringList>
+#include <QTimer>
 
 #include <unistd.h>
 
@@ -86,6 +87,62 @@ bool IpConfigurator::runHelper(const QStringList& args) {
     return proc.exitCode() == 0;
 }
 
+void IpConfigurator::runHelperAsync(const QStringList& args,
+                                    std::function<void(bool)> onDone) {
+    const QString helper = helperPath();
+    QString launcher;
+    QStringList full;
+    if (geteuid() == 0) {
+        launcher = helper;
+        full = args;
+    } else if (const QString pkexec = QStandardPaths::findExecutable(QStringLiteral("pkexec"));
+               !pkexec.isEmpty()) {
+        launcher = pkexec;
+        full = QStringList{} << helper << args;
+    } else if (const QString sudo = QStandardPaths::findExecutable(QStringLiteral("sudo"));
+               !sudo.isEmpty()) {
+        launcher = sudo;
+        full = QStringList{} << QStringLiteral("-n") << helper << args;
+    } else {
+        Logger::instance().error(
+            QStringLiteral("static IP: need root but neither pkexec nor sudo is available"));
+        if (onDone) onDone(false);
+        return;
+    }
+
+    auto* proc = new QProcess(qApp);
+    proc->setProcessChannelMode(QProcess::MergedChannels);
+    QObject::connect(proc, &QProcess::finished, qApp,
+        [proc, cb = std::move(onDone)](int exitCode, QProcess::ExitStatus) {
+            const QString out = QString::fromUtf8(proc->readAll()).trimmed();
+            if (!out.isEmpty()) Logger::instance().info(out);
+            proc->deleteLater();
+            if (cb) cb(exitCode == 0);
+        });
+    proc->start(launcher, full);
+    proc->closeWriteChannel();
+    // Hard bound: the helper is a quick `ip addr/route` batch; a stuck run
+    // must not leak a pkexec prompt forever.
+    QTimer::singleShot(30000, proc, [proc] {
+        if (proc->state() != QProcess::NotRunning) proc->kill();
+    });
+}
+
+bool IpConfigurator::staticArgs(const Profile& p, const QString& iface,
+                                bool applyMode, QStringList* out) {
+    if (iface.isEmpty() || p.ipMode != IpMode::Static || p.staticIp.isEmpty())
+        return false;
+    const int prefix = maskToPrefix(p.staticNetmask);
+    *out = QStringList{applyMode ? QStringLiteral("apply") : QStringLiteral("clear"),
+                       QStringLiteral("--iface"),  iface,
+                       QStringLiteral("--ip"),     p.staticIp,
+                       QStringLiteral("--prefix"), QString::number(prefix)};
+    if (!p.staticGateway.isEmpty()) out->append(QStringLiteral("--gw")), out->append(p.staticGateway);
+    if (applyMode && !p.staticDns.isEmpty())
+        out->append(QStringLiteral("--dns")), out->append(p.staticDns);
+    return true;
+}
+
 bool IpConfigurator::apply(const Profile& p, const QString& iface) {
     if (iface.isEmpty()) {
         Logger::instance().warn(QStringLiteral("IP config: no interface; skipping"));
@@ -101,36 +158,63 @@ bool IpConfigurator::apply(const Profile& p, const QString& iface) {
             break;
     }
 
-    if (p.staticIp.isEmpty()) {
+    QStringList args;
+    if (!staticArgs(p, iface, true, &args)) {
         Logger::instance().warn(
             QStringLiteral("IP config: Static mode but no address set; skipping"));
         return false;
     }
-    const int prefix = maskToPrefix(p.staticNetmask);
-    QStringList args;
-    args << QStringLiteral("apply")
-         << QStringLiteral("--iface")  << iface
-         << QStringLiteral("--ip")     << p.staticIp
-         << QStringLiteral("--prefix") << QString::number(prefix);
-    if (!p.staticGateway.isEmpty()) args << QStringLiteral("--gw")  << p.staticGateway;
-    if (!p.staticDns.isEmpty())     args << QStringLiteral("--dns") << p.staticDns;
 
     Logger::instance().info(
-        QStringLiteral("IP config: static %1/%2 on %3").arg(p.staticIp).arg(prefix).arg(iface));
+        QStringLiteral("IP config: static %1/%2 on %3").arg(p.staticIp).arg(
+            maskToPrefix(p.staticNetmask)).arg(iface));
     return runHelper(args);
 }
 
-void IpConfigurator::clear(const Profile& p, const QString& iface) {
-    if (iface.isEmpty() || p.ipMode != IpMode::Static || p.staticIp.isEmpty())
+void IpConfigurator::applyAsync(const Profile& p, const QString& iface,
+                                std::function<void(bool)> onDone) {
+    if (iface.isEmpty()) {
+        Logger::instance().warn(QStringLiteral("IP config: no interface; skipping"));
+        if (onDone) onDone(false);
         return;
-    const int prefix = maskToPrefix(p.staticNetmask);
+    }
+    switch (p.ipMode) {
+        case IpMode::Inherit:
+            if (onDone) onDone(true);
+            return;
+        case IpMode::Dhcp:
+            Logger::instance().info(QStringLiteral("IP config: DHCP on %1 (background)").arg(iface));
+            dhcp::renewAsync(iface, std::move(onDone));
+            return;
+        case IpMode::Static:
+            break;
+    }
+
     QStringList args;
-    args << QStringLiteral("clear")
-         << QStringLiteral("--iface")  << iface
-         << QStringLiteral("--ip")     << p.staticIp
-         << QStringLiteral("--prefix") << QString::number(prefix);
-    if (!p.staticGateway.isEmpty()) args << QStringLiteral("--gw") << p.staticGateway;
+    if (!staticArgs(p, iface, true, &args)) {
+        Logger::instance().warn(
+            QStringLiteral("IP config: Static mode but no address set; skipping"));
+        if (onDone) onDone(false);
+        return;
+    }
+    Logger::instance().info(
+        QStringLiteral("IP config: static %1/%2 on %3").arg(p.staticIp).arg(
+            maskToPrefix(p.staticNetmask)).arg(iface));
+    runHelperAsync(args, std::move(onDone));
+}
+
+void IpConfigurator::clear(const Profile& p, const QString& iface) {
+    QStringList args;
+    if (!staticArgs(p, iface, false, &args))
+        return;
     runHelper(args);
+}
+
+void IpConfigurator::clearAsync(const Profile& p, const QString& iface) {
+    QStringList args;
+    if (!staticArgs(p, iface, false, &args))
+        return;
+    runHelperAsync(args);
 }
 
 } // namespace inode

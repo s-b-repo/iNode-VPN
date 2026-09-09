@@ -3,8 +3,11 @@
 #include "core/Profile.h"
 #include "core/Protocol.h"
 
+#include <QHostAddress>
+
+#include <functional>
+
 class QUdpSocket;
-class QHostAddress;
 class QTimer;
 
 namespace inode {
@@ -45,12 +48,18 @@ private:
     enum class Step { Idle, Challenge, Auth, Affirm, KeepAlive };
 
     void sendChallenge();
-    void sendAuth(const QByteArray& challenge);
+    // The ReqId echoed back in REQ_AUTH must be the one the server assigned
+    // in ACK_CHALLENGE (offset 6), not a locally invented counter.
+    void sendAuth(const QByteArray& challenge, quint16 serverReqId);
     void sendAffirm();
     void sendLogout();
     void onDatagram();
     void onKeepAlive();
-    QHostAddress resolveHost() const;    // DNS resolve m_host once, with fallback
+    QHostAddress resolveHost() const;    // cached resolution (m_addr)
+    // Resolve m_host asynchronously (sync QHostInfo::fromName() on every
+    // send — heartbeats included — used to freeze the GUI for the DNS
+    // timeout) and run `then` once resolved. Resolution failure → Failed.
+    void resolveHostAsync(std::function<void()> then);
 
     // H3C proprietary dialect (m_dialect == 1).
     void sendH3cLogin();
@@ -61,6 +70,11 @@ private:
 
     QUdpSocket* m_sock     = nullptr;
     QTimer*     m_keepAlive = nullptr;
+    // Watchdog while waiting for ACK_CHALLENGE / ACK_AUTH: a silent server
+    // must not leave the protocol in Authenticating forever.
+    QTimer*     m_watchdog = nullptr;
+    QHostAddress m_addr;               // resolved server address
+    bool        m_resolving = false;
     QString     m_host;
     quint16     m_port     = 2000;
     QString     m_secret;

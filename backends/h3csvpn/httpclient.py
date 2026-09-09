@@ -90,6 +90,15 @@ class Connection:
         self.cookies = CookieJar()
         self._buf = b""
 
+    def close(self) -> None:
+        """Close the underlying socket. Idempotent."""
+        sock, self.sock = getattr(self, "sock", None), None
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
     # -- low level ---------------------------------------------------------
     def _send_all(self, data: bytes) -> None:
         self.sock.sendall(data)
@@ -111,6 +120,8 @@ class Connection:
         return out
 
     def _read_exact(self, n: int) -> bytes:
+        if n < 0:
+            raise HTTPError(f"negative body size: {n}")
         if n > C.MAX_BODY_BYTES:
             raise HTTPError(f"declared body size {n} exceeds cap {C.MAX_BODY_BYTES}")
         while len(self._buf) < n:
@@ -186,14 +197,30 @@ class Connection:
         if "chunked" in te:
             body = self._read_chunked()
         else:
-            cl = tmp.header("Content-Length")
-            try:
-                cl_int = int(cl)
-                if str(cl_int) != cl.strip():
+            cl = tmp.header("Content-Length").strip()
+            if not cl:
+                # No Content-Length: bodyless statuses (204/304/1xx) are fine —
+                # anything else on a keep-alive connection can't be framed
+                # safely, and guessing would desync every subsequent response.
+                if tmp.status == 204 or tmp.status == 304 or 100 <= tmp.status < 200:
+                    body = b""
+                else:
+                    raise HTTPError(
+                        f"response {tmp.status} has no Content-Length and is not "
+                        "chunked (keep-alive framing impossible)")
+            else:
+                try:
+                    cl_int = int(cl)
+                except ValueError:
+                    raise HTTPError(f"bad Content-Length: {cl!r}")
+                if str(cl_int) != cl:
                     raise HTTPError(f"non-integer Content-Length: {cl!r}")
+                if cl_int < 0:
+                    # A negative length would slice the buffer with negative
+                    # indices and desync the stream (verified against Qt-free
+                    # repro: body=b'HEL', 5 stale bytes left in the buffer).
+                    raise HTTPError(f"negative Content-Length: {cl!r}")
                 body = self._read_exact(cl_int)
-            except ValueError:
-                raise HTTPError(f"bad Content-Length: {cl!r}")
         tmp.body = body
         return tmp
 

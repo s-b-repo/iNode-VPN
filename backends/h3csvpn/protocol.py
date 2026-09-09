@@ -22,7 +22,10 @@ from .safexml import fromstring as _safe_fromstring
 # building
 # --------------------------------------------------------------------------
 def _el(tag: str, value: str = "", attrs: Optional[dict] = None) -> str:
-    a = "".join(f' {k}="{escape(str(v))}"' for k, v in (attrs or {}).items())
+    # Attribute values must escape quotes too, or a value containing `"`
+    # breaks out of the attribute (element text is handled by plain escape()).
+    a = "".join(f' {k}="{escape(str(v), {chr(34): "&quot;"})}"'
+                for k, v in (attrs or {}).items())
     if value == "" and not attrs:
         return f"<{tag}></{tag}>"
     return f"<{tag}{a}>{escape(str(value))}</{tag}>"

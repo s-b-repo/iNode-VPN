@@ -57,8 +57,11 @@ private:
     // path exists when one is needed.
     bool buildHelperInvocation(const QStringList& helperArgs,
                                QString* launcher, QStringList* full) const;
-    // Synchronously ask the helper to tear the tunnel down (SIGINT backend).
-    void requestStop();
+    // Ask the helper to tear the tunnel down (SIGINTs the root backend).
+    // Detached: disconnect()/shutdown must never block the GUI for the
+    // backend's full logout+teardown; the backend's finished() reports
+    // Disconnected once it is really gone.
+    void requestStopDetached();
 
     // Locate the vendored python backend dir (the one *containing* h3csvpn/).
     static QString backendDir();

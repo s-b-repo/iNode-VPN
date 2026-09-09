@@ -43,11 +43,25 @@ def _ask(prompt, secret=False):
 def _conn(hostport):
     host, _, port = hostport.partition(":")
     conn = tls_connect(host, int(port or 3000), TLSConfig(verify=False))
-    r = conn.get(C.PATH_INDEX, ua=C.UA_V7)
-    if r.is_redirect:
-        r = conn.get(r.header("Location"), ua=C.UA_V7, cookies=True)
-    gw = P.parse_gatewayinfo(r.text)
-    return conn, gw
+    try:
+        r = conn.get(C.PATH_INDEX, ua=C.UA_V7)
+        if r.is_redirect:
+            r = conn.get(_path_of(r.header("Location")), ua=C.UA_V7, cookies=True)
+        gw = P.parse_gatewayinfo(r.text)
+        return conn, gw
+    except BaseException:
+        conn.close()
+        raise
+
+
+def _path_of(url):
+    # The gateway may send an absolute redirect; only the path may go on the
+    # request line of our raw HTTP/1.1 client.
+    if url.startswith(("http://", "https://")):
+        from urllib.parse import urlsplit
+        sp = urlsplit(url)
+        return sp.path + (("?" + sp.query) if sp.query else "")
+    return url if url.startswith("/") else "/" + url
 
 
 def _fetch_captcha(conn, gw):
@@ -58,7 +72,8 @@ def _fetch_captcha(conn, gw):
 
 def _login(conn, gw, user, pw, code):
     xml = P.build_login_xml(username=user, password=pw, vld_code=code)
-    resp = conn.post(gw.login_url, urlencode_body(xml), ua=C.UA_V7, cookies=True)
+    resp = conn.post(_path_of(gw.login_url), urlencode_body(xml), ua=C.UA_V7,
+                     cookies=True)
     return P.parse_login_result(resp.text)
 
 
@@ -73,8 +88,11 @@ def reliable(hostport=None, user=None, pw=None, max_tries=12):
         return
     for i in range(int(max_tries)):
         conn, gw = _conn(hostport)
-        code = cap.solve(_fetch_captcha(conn, gw)) or ""
-        res = _login(conn, gw, user, pw, code)
+        try:
+            code = cap.solve(_fetch_captcha(conn, gw)) or ""
+            res = _login(conn, gw, user, pw, code)
+        finally:
+            conn.close()
         passed = "verify code" not in (res.reply_message or "").lower()
         print(f"[try {i}] ocr={code!r:8} captcha_passed={passed} "
               f"reply={res.reply_message!r}")
@@ -91,7 +109,10 @@ def accuracy(hostport=None, n=12):
     hits = 0
     for i in range(int(n)):
         conn, gw = _conn(hostport)
-        code = cap.solve(_fetch_captcha(conn, gw)) or ""
+        try:
+            code = cap.solve(_fetch_captcha(conn, gw)) or ""
+        finally:
+            conn.close()
         ok = len(code) == 4
         hits += ok
         print(f"[{i}] {code!r:8} {'4-char' if ok else 'partial'}")
@@ -99,4 +120,8 @@ def accuracy(hostport=None, n=12):
 
 
 if __name__ == "__main__":
-    {"reliable": reliable, "accuracy": accuracy}[sys.argv[1]](*sys.argv[2:])
+    cmds = {"reliable": reliable, "accuracy": accuracy}
+    if len(sys.argv) < 2 or sys.argv[1] not in cmds:
+        print("usage: captcha_lab.py {reliable|accuracy} [HOST:PORT] ...")
+        raise SystemExit(2)
+    cmds[sys.argv[1]](*sys.argv[2:])

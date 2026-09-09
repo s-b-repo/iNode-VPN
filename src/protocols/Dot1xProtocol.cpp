@@ -5,7 +5,9 @@
 #include "core/Logger.h"
 #include "core/NetUtil.h"
 
+#include <QCoreApplication>
 #include <QDateTime>
+#include <QFileInfo>
 #include <QProcess>
 #include <QStandardPaths>
 #include <QTimer>
@@ -13,6 +15,21 @@
 #include <unistd.h>
 
 namespace inode {
+
+namespace {
+// The dot1x helper is the only path that understands --stdin-password (it
+// re-injects the password as -p without exposing it in ps) and the only
+// binary allow-listed by the polkit policy for this action. It lives in the
+// dev tree next to the other helpers, or in /usr/libexec after install.
+QString dot1xHelperPath() {
+    const QString local = QCoreApplication::applicationDirPath()
+                          + QStringLiteral("/../scripts/inode-dot1x-helper");
+    if (QFileInfo::exists(local)) return QFileInfo(local).absoluteFilePath();
+    const QString libexec = QStringLiteral("/usr/libexec/iNodeClient-Qt/inode-dot1x-helper");
+    if (QFileInfo::exists(libexec)) return libexec;
+    return QStringLiteral("inode-dot1x-helper");
+}
+} // namespace
 
 Dot1xProtocol::Dot1xProtocol(QObject* parent) : IProtocol(parent) {
     m_statsTimer = new QTimer(this);
@@ -27,8 +44,7 @@ Dot1xProtocol::~Dot1xProtocol() {
     }
 }
 
-static QStringList minieapArgs(const Profile& profile) {
-    QStringList args;
+static QStringList minieapArgs(const Profile& profile) {    QStringList args;
     args << QStringLiteral("--nogui")
          << QStringLiteral("-u") << profile.username
          << QStringLiteral("-n") << profile.iface
@@ -111,17 +127,40 @@ void Dot1xProtocol::connectWith(const Profile& profile) {
             args << profile.dot1xExtraArgs.split(QLatin1Char(' '), Qt::SkipEmptyParts);
     }
 
-    QString launcher = bin;
-    QStringList finalArgs = args;
-    // Prepend --stdin-password so the helper reads the password from stdin
-    // instead of exposing it in argv/ps.
-    finalArgs.prepend(QStringLiteral("--stdin-password"));
-    if (geteuid() != 0) {
+    QString launcher;
+    QStringList finalArgs;
+    // Route through the helper: it strips the --stdin-password marker, reads
+    // the password from stdin (never argv/ps) and execs the supplicant with
+    // -p <pw>. Launching the supplicant directly here would fail twice over:
+    // minieap/mentohust reject --stdin-password, and pkexec would not match
+    // the policy's allow-listed exec path.
+    const QString helper = dot1xHelperPath();
+    if (geteuid() == 0) {
+        launcher = helper;
+        finalArgs << QStringLiteral("--stdin-password") << args;
+    } else {
         const QString pkexec = QStandardPaths::findExecutable(QStringLiteral("pkexec"));
-        if (!pkexec.isEmpty()) {
-            launcher = pkexec;
-            finalArgs.prepend(bin);
+        if (pkexec.isEmpty()) {
+            emit errorOccurred(tr(
+                "pkexec is required to run the 802.1X supplicant with elevated "
+                "privileges. Install polkit, or run the client as root."));
+            setState(ConnectionState::Failed);
+            return;
         }
+        launcher = pkexec;
+        finalArgs << helper << QStringLiteral("--stdin-password") << args;
+    }
+
+    // A missing helper would surface as a bare FailedToStart ("Process
+    // error: 0") — explain the real problem instead. dot1xHelperPath()
+    // returns a bare name only when neither the dev tree nor /usr/libexec
+    // had it.
+    if (!helper.startsWith(QLatin1Char('/'))) {
+        emit errorOccurred(tr(
+            "The 802.1X helper (inode-dot1x-helper) was not found. Install the "
+            "package so it lands in /usr/libexec/iNodeClient-Qt/."));
+        setState(ConnectionState::Failed);
+        return;
     }
 
     Logger::instance().info(
@@ -133,7 +172,16 @@ void Dot1xProtocol::connectWith(const Profile& profile) {
 
 void Dot1xProtocol::startProcess(const QString& binary, const QStringList& args,
                                   const QByteArray& stdinData) {
-    if (m_proc) { m_proc->deleteLater(); m_proc = nullptr; }
+    if (m_proc) {
+        // Re-entry safety: a still-running supplicant must be stopped before
+        // its QProcess object is disposed of.
+        if (m_proc->state() != QProcess::NotRunning) {
+            m_proc->terminate();
+            if (!m_proc->waitForFinished(2000)) m_proc->kill();
+        }
+        m_proc->deleteLater();
+        m_proc = nullptr;
+    }
 
     m_proc = new QProcess(this);
     m_proc->setProcessChannelMode(QProcess::MergedChannels);
@@ -168,8 +216,10 @@ void Dot1xProtocol::onReadyRead() {
             lower.contains(QStringLiteral("eap-success"))) {
             if (state() != ConnectionState::Connected) {
                 // 802.1X only authenticates the port — it brings no address of
-                // its own. Apply the profile's IP mode (DHCP / static) now.
-                IpConfigurator::apply(m_profile, m_iface);
+                // its own. Apply the profile's IP mode (DHCP / static) now,
+                // asynchronously: a pkexec prompt or slow dhclient must not
+                // freeze the GUI thread inside this readyRead handler.
+                IpConfigurator::applyAsync(m_profile, m_iface);
                 ConnectionStats s;
                 s.iface = m_iface;
                 s.connectedAt = QDateTime::currentDateTime();
@@ -182,6 +232,9 @@ void Dot1xProtocol::onReadyRead() {
         } else if (lower.contains(QStringLiteral("failure")) ||
                    lower.contains(QStringLiteral("rejected")) ||
                    lower.contains(QStringLiteral("eap-failure"))) {
+            emit errorOccurred(tr("802.1X authentication rejected by the switch: %1 "
+                                  "(wrong username/password, wrong auth mode, or the "
+                                  "port is not 802.1X-enabled)").arg(line.trimmed()));
             setState(ConnectionState::Failed);
             m_password.clear();
         } else if (lower.contains(QStringLiteral("challenge")) ||
@@ -202,11 +255,16 @@ void Dot1xProtocol::onFinished(int exitCode, int /*exitStatus*/) {
     emit logLine(tr("process exited with code %1").arg(exitCode));
     m_password.clear();
     m_statsTimer->stop();
-    // The link is down — undo any static address we programmed for it.
-    IpConfigurator::clear(m_profile, m_iface);
+    // The link is down — undo any static address we programmed for it
+    // (asynchronously: same GUI-freeze reasoning as applyAsync above).
+    IpConfigurator::clearAsync(m_profile, m_iface);
     if (state() == ConnectionState::Connected && exitCode == 0) {
         setState(ConnectionState::Disconnected);
     } else if (exitCode != 0 && state() != ConnectionState::Failed) {
+        emit errorOccurred(tr("802.1X supplicant exited with code %1 before "
+                              "authenticating — see its output above (interface "
+                              "down? cable unplugged? wrong interface selected?)")
+                               .arg(exitCode));
         setState(ConnectionState::Failed);
     } else {
         setState(ConnectionState::Disconnected);

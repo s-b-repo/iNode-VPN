@@ -75,8 +75,12 @@ static QByteArray md5(const QByteArray& in) {
 
 static void appendAttr(QByteArray& out, quint8 type, const QByteArray& value) {
     out.append(static_cast<char>(type));
-    out.append(static_cast<char>(2 + value.size())); // length includes header
-    out.append(value);
+    // The 1-byte length field caps the value at 253 bytes; anything longer
+    // would wrap the length byte and corrupt every following attribute.
+    // Truncate rather than emit a broken frame.
+    const QByteArray v = value.left(253);
+    out.append(static_cast<char>(2 + v.size())); // length includes header
+    out.append(v);
 }
 
 static QByteArray buildHeader(quint8 type, quint8 authType, quint16 serial, quint16 req,
@@ -123,13 +127,36 @@ static QByteArray userIpFromLocal(const QString& iface) {
 PortalProtocol::PortalProtocol(QObject* parent) : IProtocol(parent) {}
 
 QHostAddress PortalProtocol::resolveHost() const {
-    const auto addrs = QHostInfo::fromName(m_host).addresses();
-    if (!addrs.isEmpty()) return addrs.first();
+    if (!m_addr.isNull()) return m_addr;
+    // Literal IP or a cached resolution — no synchronous DNS here.
     QHostAddress fallback(m_host);
     if (!fallback.isNull()) return fallback;
-    Logger::instance().warn(
-        QStringLiteral("Portal: DNS resolution failed for %1").arg(m_host));
     return {};
+}
+
+void PortalProtocol::resolveHostAsync(std::function<void()> then) {
+    if (!m_addr.isNull()) { if (then) then(); return; }
+    if (m_resolving) return;   // a lookup is already in flight
+    m_resolving = true;
+    QHostInfo::lookupHost(m_host, this, [this, then = std::move(then)](const QHostInfo& info) {
+        m_resolving = false;
+        if (!info.addresses().isEmpty()) {
+            m_addr = info.addresses().first();
+            if (then) then();
+            return;
+        }
+        QHostAddress literal(m_host);
+        if (!literal.isNull()) {
+            m_addr = literal;
+            if (then) then();
+            return;
+        }
+        Logger::instance().warn(
+            QStringLiteral("Portal: DNS resolution failed for %1").arg(m_host));
+        emit errorOccurred(tr("Portal: DNS resolution failed for %1").arg(m_host));
+        setState(ConnectionState::Failed);
+        if (m_watchdog) m_watchdog->stop();
+    });
 }
 
 PortalProtocol::~PortalProtocol() {
@@ -182,9 +209,27 @@ void PortalProtocol::connectWith(const Profile& profile) {
     }
     connect(m_sock, &QUdpSocket::readyRead, this, &PortalProtocol::onDatagram);
 
+    // Watchdog: if the server never answers REQ_CHALLENGE / REQ_AUTH (wrong
+    // host, firewall, silent BAS), fail cleanly instead of spinning in
+    // Authenticating forever. Stopped on any inbound packet and on teardown.
+    if (!m_watchdog) {
+        m_watchdog = new QTimer(this);
+        m_watchdog->setSingleShot(true);
+        connect(m_watchdog, &QTimer::timeout, this, [this] {
+            if (m_step == Step::KeepAlive || !m_sock) return;
+            emit errorOccurred(tr("Portal: no response from server (timeout)."));
+            setState(ConnectionState::Failed);
+            m_sock->close();
+        });
+    }
+
     setState(ConnectionState::Connecting);
-    if (m_dialect == 1) sendH3cLogin();
-    else                sendChallenge();
+    // Async DNS: the first request goes out once the server address is known.
+    resolveHostAsync([this] {
+        m_watchdog->start(10000);
+        if (m_dialect == 1) sendH3cLogin();
+        else                sendChallenge();
+    });
 }
 
 void PortalProtocol::sendChallenge() {
@@ -199,14 +244,16 @@ void PortalProtocol::sendChallenge() {
     std::memcpy(pkt.data() + 16, md5(forHash).constData(), 16);
 
     Logger::instance().info(tr("Portal: REQ_CHALLENGE → %1:%2").arg(m_host).arg(m_port));
-    const auto addr = resolveHost();
-    m_sock->writeDatagram(pkt, addr, m_port);
+    if (!m_addr.isNull())
+        m_sock->writeDatagram(pkt, m_addr, m_port);
     setState(ConnectionState::Authenticating);
 }
 
-void PortalProtocol::sendAuth(const QByteArray& challenge) {
+void PortalProtocol::sendAuth(const QByteArray& challenge, quint16 serverReqId) {
     m_step = Step::Auth;
-    ++m_reqId;
+    // Portal v2: REQ_AUTH must echo the ReqId the server assigned in
+    // ACK_CHALLENGE (offset 6), not a locally invented counter.
+    m_reqId = serverReqId;
 
     // Compute CHAP password = MD5(ReqId || password || challenge), 16 bytes.
     QByteArray forChap;
@@ -229,8 +276,8 @@ void PortalProtocol::sendAuth(const QByteArray& challenge) {
     std::memcpy(full.data() + 16, md5(forHash).constData(), 16);
 
     Logger::instance().info(tr("Portal: REQ_AUTH user='%1' reqId=%2").arg(m_user).arg(m_reqId));
-    const auto addr = resolveHost();
-    m_sock->writeDatagram(full, addr, m_port);
+    if (!m_addr.isNull())
+        m_sock->writeDatagram(full, m_addr, m_port);
 }
 
 void PortalProtocol::sendAffirm() {
@@ -239,7 +286,8 @@ void PortalProtocol::sendAffirm() {
     QByteArray forHash = pkt + m_secret.toUtf8();
     std::memcpy(pkt.data() + 16, md5(forHash).constData(), 16);
     const auto addr = resolveHost();
-    m_sock->writeDatagram(pkt, addr, m_port);
+    if (!addr.isNull())
+        m_sock->writeDatagram(pkt, addr, m_port);
     Logger::instance().info(QStringLiteral("Portal: AFF_ACK_AUTH sent"));
 }
 
@@ -251,7 +299,8 @@ void PortalProtocol::sendLogout() {
     QByteArray forHash = pkt + m_secret.toUtf8();
     std::memcpy(pkt.data() + 16, md5(forHash).constData(), 16);
     const auto addr = resolveHost();
-    m_sock->writeDatagram(pkt, addr, m_port);
+    if (!addr.isNull())
+        m_sock->writeDatagram(pkt, addr, m_port);
     Logger::instance().info(QStringLiteral("Portal: REQ_LOGOUT sent"));
 }
 
@@ -263,6 +312,8 @@ void PortalProtocol::onDatagram() {
         if (m_dialect == 1) { handleH3cPacket(data); continue; }
         const quint8 type = static_cast<quint8>(data.at(1));
         const quint8 err  = static_cast<quint8>(data.at(14));
+        // Any inbound reply proves the server is alive — stop the watchdog.
+        if (m_watchdog) m_watchdog->stop();
 
         if (type == TYPE_ACK_CHALLENGE) {
             if (err != 0) {
@@ -270,6 +321,10 @@ void PortalProtocol::onDatagram() {
                 setState(ConnectionState::Failed);
                 return;
             }
+            // The server assigns our ReqId here (header offset 6); REQ_AUTH
+            // must echo it back, along with the CHAP input below.
+            const quint16 serverReqId =
+                qFromBigEndian<quint16>(reinterpret_cast<const uchar*>(data.constData()) + 6);
             // Extract challenge attribute.
             int off = 32;
             QByteArray challenge;
@@ -285,7 +340,8 @@ void PortalProtocol::onDatagram() {
                 setState(ConnectionState::Failed);
                 return;
             }
-            sendAuth(challenge);
+            sendAuth(challenge, serverReqId);
+            m_watchdog->start(10000);   // arm for the ACK_AUTH wait
         } else if (type == TYPE_ACK_AUTH) {
             if (err != 0) {
                 emit errorOccurred(tr("Portal: auth rejected (code %1)").arg(err));
@@ -293,6 +349,9 @@ void PortalProtocol::onDatagram() {
                 return;
             }
             sendAffirm();
+            // The plaintext password is no longer needed once the session is
+            // up — don't keep it in memory for the object's whole lifetime.
+            m_pass.clear();
 
             ConnectionStats s;
             s.iface       = QString();
@@ -312,6 +371,7 @@ void PortalProtocol::onDatagram() {
         } else if (type == TYPE_ACK_LOGOUT) {
             Logger::instance().info(QStringLiteral("Portal: ACK_LOGOUT"));
             if (m_keepAlive) m_keepAlive->stop();
+            if (m_watchdog) m_watchdog->stop();
             setState(ConnectionState::Disconnected);
         }
     }
@@ -364,8 +424,8 @@ void PortalProtocol::sendH3cLogin() {
 
     Logger::instance().info(tr("Portal(H3C): LOGIN_REQUEST user='%1' (%2 attrs)")
                                 .arg(m_user).arg(attrNum));
-    const auto addr = resolveHost();
-    m_sock->writeDatagram(full, addr, m_port);
+    if (!m_addr.isNull())
+        m_sock->writeDatagram(full, m_addr, m_port);
     setState(ConnectionState::Authenticating);
 }
 
@@ -378,7 +438,8 @@ void PortalProtocol::sendH3cHeartbeat() {
     QByteArray forHash = full + m_secret.toUtf8();
     std::memcpy(full.data() + 16, md5(forHash).constData(), 16);
     const auto addr = resolveHost();
-    m_sock->writeDatagram(full, addr, m_port);
+    if (!addr.isNull())
+        m_sock->writeDatagram(full, addr, m_port);
 }
 
 void PortalProtocol::sendH3cLogout() {
@@ -392,7 +453,8 @@ void PortalProtocol::sendH3cLogout() {
     QByteArray forHash = full + m_secret.toUtf8();
     std::memcpy(full.data() + 16, md5(forHash).constData(), 16);
     const auto addr = resolveHost();
-    m_sock->writeDatagram(full, addr, m_port);
+    if (!addr.isNull())
+        m_sock->writeDatagram(full, addr, m_port);
     Logger::instance().info(QStringLiteral("Portal(H3C): LOGOUT_REQUEST sent"));
 }
 
@@ -421,7 +483,8 @@ void PortalProtocol::replyH3cHashChallenge(const QByteArray& data) {
     QByteArray forHash = full + m_secret.toUtf8();
     std::memcpy(full.data() + 16, md5(forHash).constData(), 16);
     const auto addr = resolveHost();
-    m_sock->writeDatagram(full, addr, m_port);
+    if (!addr.isNull())
+        m_sock->writeDatagram(full, addr, m_port);
     Logger::instance().warn(QStringLiteral(
         "Portal(H3C): answered anti-track hash challenge (best-effort; "
         "exact digest not recovered)."));
@@ -430,6 +493,7 @@ void PortalProtocol::replyH3cHashChallenge(const QByteArray& data) {
 void PortalProtocol::handleH3cPacket(const QByteArray& data) {
     const quint8 type = static_cast<quint8>(data.at(1));
     const quint8 err  = static_cast<quint8>(data.at(14));
+    if (m_watchdog) m_watchdog->stop();
 
     if (type == H3C_HASH_RESPONSE - 1 || type == H3C_HASH_RESPONSE) {
         // Some builds use 0x79 for HASH_REQUEST; the 0x82 attr is the tell.
@@ -442,6 +506,8 @@ void PortalProtocol::handleH3cPacket(const QByteArray& data) {
             setState(ConnectionState::Failed);
             return;
         }
+        // Session is up — drop the plaintext password from memory.
+        m_pass.clear();
         ConnectionStats s;
         s.localIp     = QHostAddress(qFromBigEndian<quint32>(m_userIp.constData())).toString();
         s.connectedAt = QDateTime::currentDateTime();
@@ -465,6 +531,7 @@ void PortalProtocol::disconnect() {
     if (!m_sock) return;
     setState(ConnectionState::Disconnecting);
     if (m_keepAlive) m_keepAlive->stop();
+    if (m_watchdog) m_watchdog->stop();
     if (m_dialect == 1) sendH3cLogout();
     else                sendLogout();
     // Give the server a moment to reply; then tear down regardless.

@@ -263,14 +263,14 @@ priority order — the active one is shown by `iNodeClient-Qt --doctor`:
 
 1. **KWallet** (KF6 build) — unlocked by the login session via PAM.
 2. **freedesktop Secret Service** — gnome-keyring / ksecretd / KeePassXC.
-3. **System GnuPG** (`gpgstore`) — entries sealed to the user's default GPG
-   secret key (`--trust-model always`, agent + pinentry own the passphrase;
-   this app never sees it), or symmetric via pinentry when no key exists.
-   Stored as an atomic-replaced, 0600 ASCII-armored blob at
-   `~/.config/iNodeClient-Qt/secrets.gpg`. This is the recommended backend for
-   users who already run a PGP keyring.
-4. **AES-256-GCM + PBKDF2 (200k, SHA-256) master-password file** — last resort
-   when no keyring/gpg exists; 0600, master password never touches disk.
+3. **AES-256-GCM + PBKDF2 (200k, SHA-256) master-password file** — last resort
+   when no keyring exists; 0600, master password never touches disk.
+
+> **v0.3:** the **System GnuPG** backend (`gpgstore`, C12) was removed to
+> reduce attack surface (it shelled out to `gpg` for every operation and
+> maintained a second copy of every secret on disk). A leftover
+> `secrets.gpg` is decrypted once by gpg-agent and re-sealed into the active
+> backend, then renamed `secrets.gpg.migrated`.
 
 All backends refuse to write plaintext: with no backend usable, `store()`
 fails rather than persisting a secret.

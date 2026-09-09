@@ -12,8 +12,10 @@ Requires root (CAP_NET_ADMIN) to create the device and change routes.
 from __future__ import annotations
 
 import fcntl
+import ipaddress
 import os
 import shutil
+import sys
 import struct
 import subprocess
 from dataclasses import dataclass, field
@@ -43,14 +45,27 @@ def _mask_to_prefix(mask: str) -> int:
 RESOLV_BAK = C.RESOLV_CONF + ".h3c-svpn.bak"
 
 
+def _resolv_realpath() -> str:
+    """Resolve /etc/resolv.conf through symlinks.
+
+    On systemd-resolved systems it is a symlink (usually to
+    ../run/systemd/resolve/stub-resolv.conf). os.replace() would swap the
+    *symlink* for a regular file, permanently breaking resolved management;
+    writing to the resolved target keeps the link intact.
+    """
+    return os.path.realpath(C.RESOLV_CONF)
+
+
 @dataclass
 class VirtualNIC:
     name_template: str = C.IFNAME_TEMPLATE
     _fd: int = -1
     ifname: str = ""
     _dns_changed: bool = False
-    # routes we added, as (family, cidr) so cleanup uses the right `ip` family.
-    _added_routes: list[tuple[str, str]] = field(default_factory=list)
+    # routes we added, as (family-prefix-args, full spec) so cleanup deletes
+    # exactly what was added (a bare `ip route del <net>` could hit a same-
+    # prefix route owned by something else).
+    _added_routes: list[tuple[list[str], list[str]]] = field(default_factory=list)
     _opened: bool = False
 
     # -- device ------------------------------------------------------------
@@ -91,8 +106,11 @@ class VirtualNIC:
         _ip("addr", "add", f"{cfg.ipaddress}/{prefix}", "dev", self.ifname)
         _ip("link", "set", "dev", self.ifname, "up")
         if cfg.ipv6address:
-            v6p = cfg.prefixlength if ":" in (cfg.prefixlength or "") else "64"
-            _ip("-6", "addr", "add", f"{cfg.ipv6address}/{v6p}",
+            # PREFIXLENGTH refers to IPv4; the IPv6 prefix length rides on the
+            # address itself ("<addr>/<len>") when the gateway sends it.
+            addr, _, plen = cfg.ipv6address.partition("/")
+            v6p = plen.strip() or "64"
+            _ip("-6", "addr", "add", f"{addr.strip()}/{v6p}",
                 "dev", self.ifname, check=False)
 
         self._program_routes(cfg, server_ip, split_tunnel)
@@ -101,12 +119,44 @@ class VirtualNIC:
     def _add_route(self, family6: bool, *args: str) -> None:
         pre = ["-6"] if family6 else []
         if _ip(*pre, "route", "add", *args, check=False) == 0:
-            self._added_routes.append(("6" if family6 else "4", args[0]))
+            self._added_routes.append((pre, list(args)))
 
     def _program_routes(self, cfg: NetworkConfig, server_ip: Optional[str],
                         split_tunnel: bool = False) -> None:
         orig_gw = _original_default_gw()
-        full_tunnel = cfg.default_gateway and not cfg.routes and not split_tunnel
+
+        # A gateway that sends an explicit "0.0.0.0/0" (or "::/0") inside
+        # ROUTES means full tunnel even though cfg.routes is non-empty — it
+        # must get the same gateway bypass as an implicit redirect-all, or
+        # the tunnel's own TLS traffic routes into the TUN and deadlocks.
+        v4_routes, v6_routes = [], []
+        explicit_v4_default = explicit_v6_default = False
+        for r in cfg.routes:
+            net = _normalize_cidr(r)
+            if not net:
+                continue
+            if net == "0.0.0.0/0":
+                explicit_v4_default = True
+            else:
+                v4_routes.append(net)
+        for r in cfg.ipv6routes:
+            net = _normalize_cidr(r)
+            if not net:
+                continue
+            if net == "::/0":
+                explicit_v6_default = True
+            else:
+                v6_routes.append(net)
+
+        full_tunnel = ((cfg.default_gateway and not cfg.routes and not split_tunnel)
+                       or explicit_v4_default)
+        if full_tunnel and (not server_ip or not orig_gw):
+            # Without a bypass route for the gateway's own IP the encrypted
+            # connection would route into the TUN and hang the tunnel.
+            raise RuntimeError(
+                "full-tunnel mode needs the original default gateway and the "
+                "server IP to keep the tunnel's own traffic off the TUN; "
+                "got gateway=%r server_ip=%r" % (orig_gw, server_ip))
 
         # 1) keep the gateway IP and explicit exclusions OFF the tunnel.
         bypass = list(cfg.exclude_routes)
@@ -124,61 +174,77 @@ class VirtualNIC:
         if full_tunnel:
             for net in ("0.0.0.0/1", "128.0.0.0/1"):  # split-default
                 self._add_route(False, net, "dev", self.ifname)
-        for r in cfg.routes:
-            net = _normalize_cidr(r)
-            if net:
-                self._add_route(False, net, "dev", self.ifname)
+        for net in v4_routes:
+            self._add_route(False, net, "dev", self.ifname)
 
         # 3) IPv6 routes (tracked for cleanup; full-tunnel split if needed).
-        if cfg.ipv6address and cfg.default_gateway and not cfg.ipv6routes:
+        v6_full = (cfg.ipv6address and cfg.default_gateway and not cfg.ipv6routes) \
+            or explicit_v6_default
+        if cfg.ipv6address and v6_full:
             for net in ("::/1", "8000::/1"):
                 self._add_route(True, net, "dev", self.ifname)
-        for r in cfg.ipv6routes:
-            net = r.strip()
-            if net:
-                self._add_route(True, net, "dev", self.ifname)
+        for net in v6_routes:
+            self._add_route(True, net, "dev", self.ifname)
 
     def _program_dns(self, cfg: NetworkConfig) -> None:
-        servers = list(cfg.dns) + list(cfg.ipv6dns)
+        # Only IP literals belong in resolv.conf; hostnames (a gateway bug)
+        # would leave the client with a broken resolver.
+        servers = []
+        for s in list(cfg.dns) + list(cfg.ipv6dns):
+            try:
+                ipaddress.ip_address(s.strip())
+            except ValueError:
+                continue
+            servers.append(s.strip())
         if not servers:
             return
+        resolv = _resolv_realpath()
         # Idempotent + crash-safe: if a previous run left our marker / a backup,
         # restore the real original first so we never capture our own file.
         self._restore_dns_if_stale()
         try:
-            original = open(C.RESOLV_CONF, "rb").read()
+            with open(resolv, "rb") as f:
+                original = f.read()
         except OSError:
             original = b""
         try:
             with open(RESOLV_BAK, "wb") as bak:  # on-disk backup survives a crash
                 bak.write(original)
-        except OSError:
-            return  # can't back up safely -> don't touch resolv.conf
+        except OSError as exc:
+            # Can't back up safely -> don't touch resolv.conf, but say so:
+            # the user would otherwise see "dns=..." in the connect line and
+            # wonder why names don't resolve.
+            sys.stderr.write(f"[!] could not back up {resolv} ({exc}); leaving "
+                             "DNS unchanged — is /etc read-only or immutable?\n")
+            return
         body = "\n".join([C.RESOLV_MARKER] + [f"nameserver {s}" for s in servers]) + "\n"
-        _atomic_write(C.RESOLV_CONF, body.encode("utf-8"))
+        _atomic_write(resolv, body.encode("utf-8"))
         self._dns_changed = True
 
     def _restore_dns_if_stale(self) -> None:
+        resolv = _resolv_realpath()
         try:
-            cur = open(C.RESOLV_CONF, "rb").read()
+            with open(resolv, "rb") as f:
+                cur = f.read()
         except OSError:
             return
         if C.RESOLV_MARKER.encode() in cur and os.path.exists(RESOLV_BAK):
             try:
-                _atomic_write(C.RESOLV_CONF, open(RESOLV_BAK, "rb").read())
+                with open(RESOLV_BAK, "rb") as f:
+                    _atomic_write(resolv, f.read())
             except OSError:
                 pass
 
     # -- teardown ----------------------------------------------------------
     def close(self) -> None:
-        for family, net in reversed(self._added_routes):
-            pre = ["-6"] if family == "6" else []
-            _ip(*pre, "route", "del", net, check=False)
+        for pre, args in reversed(self._added_routes):
+            _ip(*pre, "route", "del", *args, check=False)
         self._added_routes.clear()
         if self._dns_changed:
             try:
                 if os.path.exists(RESOLV_BAK):
-                    _atomic_write(C.RESOLV_CONF, open(RESOLV_BAK, "rb").read())
+                    with open(RESOLV_BAK, "rb") as f:
+                        _atomic_write(_resolv_realpath(), f.read())
                     os.unlink(RESOLV_BAK)
             except OSError:
                 pass
@@ -200,16 +266,29 @@ class VirtualNIC:
 
 
 def _normalize_cidr(route: str) -> str:
-    """Accept ``ip``, ``ip/len`` or ``ip mask`` and return ``ip/len``."""
+    """Accept ``ip``, ``ip/len`` or ``ip mask``; return ``ip/len`` or "".
+
+    Gateway-supplied strings are validated with ``ipaddress`` so `ip route`
+    keywords (``default``, ``throw``, ``unreachable``...) or malformed input
+    can never be smuggled into the route table, and garbage masks don't
+    silently become host routes.
+    """
     route = route.strip()
     if not route:
         return ""
-    if "/" in route:
-        return route
-    parts = route.split()
-    if len(parts) == 2:  # "ip mask"
-        return f"{parts[0]}/{_mask_to_prefix(parts[1])}"
-    return f"{route}/32"
+    try:
+        parts = route.split()
+        if len(parts) == 2:  # "ip mask"
+            ipaddress.IPv4Address(parts[1])
+            prefix = _mask_to_prefix(parts[1])
+            net = ipaddress.ip_network(f"{parts[0]}/{prefix}", strict=False)
+        elif "/" in route:
+            net = ipaddress.ip_network(route, strict=False)
+        else:
+            net = ipaddress.ip_network(f"{route}/32", strict=False)
+    except ValueError:
+        return ""
+    return str(net)
 
 
 def _original_default_gw() -> str:

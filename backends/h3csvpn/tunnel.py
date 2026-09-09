@@ -11,6 +11,7 @@ Frame layout (both directions), big-endian length:
 """
 from __future__ import annotations
 
+import os
 import select
 import socket
 import struct
@@ -169,11 +170,21 @@ class Tunnel:
         # dispatched) until run() so early data frames are never dropped.
         self._early: list[tuple[int, int, bytes]] = (
             self.dec.feed(initial_buffer) if initial_buffer else [])
+        # A partial TLS record makes recv() block up to the transport timeout
+        # (30 s by default) inside both wait_netconfig() and the pump, stalling
+        # the state machine. Shorten it; timeouts are non-fatal in both loops.
+        try:
+            self.sock.settimeout(5.0)
+        except (OSError, AttributeError):
+            pass
 
     # -- sending -----------------------------------------------------------
     def send_frame(self, ftype: int, subtype: int, payload: bytes = b"") -> None:
+        sock = self.sock
+        if sock is None:
+            raise OSError("tunnel socket is closed")
         with self._send_lock:
-            self.sock.sendall(encode_frame(ftype, subtype, payload))
+            sock.sendall(encode_frame(ftype, subtype, payload))
 
     def send_ip(self, packet: bytes) -> None:
         self.send_frame(C.FRAME_DATA, 0, packet)
@@ -188,7 +199,7 @@ class Tunnel:
                     self._stop.set()
                     try:
                         self.sock.shutdown(socket.SHUT_RDWR)
-                    except OSError:
+                    except (OSError, AttributeError):
                         pass
                     return
                 self._miss += 1
@@ -209,8 +220,16 @@ class Tunnel:
             if ftype == C.FRAME_DATA:
                 self.bytes_in += len(payload)
                 if self.tun_fd is not None:
-                    import os
-                    os.write(self.tun_fd, payload)
+                    try:
+                        written = os.write(self.tun_fd, payload)
+                    except OSError:
+                        self._log("TUN write failed — stopping tunnel")
+                        self._stop.set()
+                        return
+                    if written != len(payload):
+                        # TUN writes are packet-atomic on Linux, so a short
+                        # write means the device is going away.
+                        self._log(f"TUN short write ({written}/{len(payload)} bytes)")
                 if self.on_data:
                     self.on_data(payload)
             elif ftype == C.FRAME_HEARTBEAT:
@@ -241,15 +260,24 @@ class Tunnel:
             rlist.append(self.tun_fd)
         try:
             while not self._stop.is_set():
-                ready, _, _ = select.select(rlist, [], [], 1.0)
+                # Decrypted bytes buffered inside the SSLSocket are invisible
+                # to select(); drain them first or the pump idles in 1 s
+                # select ticks while a whole record is pending.
+                pending = getattr(self.sock, "pending", None)
+                if pending and pending() > 0:
+                    ready: list = [self.sock]
+                else:
+                    ready, _, _ = select.select(rlist, [], [], 1.0)
                 for r in ready:
                     if r is self.sock:
-                        data = self.sock.recv(C.BIG_BUF_SIZE)
+                        try:
+                            data = self.sock.recv(C.BIG_BUF_SIZE)
+                        except (socket.timeout, TimeoutError):
+                            continue
                         if not data:
                             raise TunnelClosed("tunnel socket closed")
                         self._dispatch(self.dec.feed(data))
                     else:  # TUN fd has an outbound packet
-                        import os
                         pkt = os.read(self.tun_fd, C.BIG_BUF_SIZE)
                         if pkt:
                             self.send_ip(pkt)
@@ -258,6 +286,21 @@ class Tunnel:
 
     def stop(self) -> None:
         self._stop.set()
+        # Wake a pump blocked in select()/recv(): the graceful shutdown makes
+        # the pending recv return EOF immediately instead of after the timeout.
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except (OSError, AttributeError):
+            pass
+        hb = self._hb_thread
+        if hb is not None and hb is not threading.current_thread():
+            hb.join(timeout=2.0)      # daemon thread — don't block on a stuck sendall
+        sock, self.sock = self.sock, None
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
 
     def wait_netconfig(self, timeout: float = 15.0) -> Optional[NetworkConfig]:
         """Block until the first type=3/sub=2 netconfig frame arrives (used right

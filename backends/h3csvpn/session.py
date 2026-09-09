@@ -18,7 +18,7 @@ from . import protocol as P
 from .crypto import urlencode_body, make_private_blob, rsa_encrypt_password_b64
 from .httpclient import Connection, Response
 from .transport import TLSConfig, tls_connect
-from .tunnel import Tunnel, NetworkConfig, parse_netconfig
+from .tunnel import Tunnel, TunnelClosed, NetworkConfig, parse_netconfig
 from . import spa as spa_mod
 
 
@@ -67,6 +67,9 @@ class Prompter:
         try:
             return input(f"[challenge:{ctype}] {message}\nCode: ").strip()
         except EOFError:
+            sys.stderr.write(f"[!] the gateway requires a {ctype} challenge code "
+                             f"({message!r}) but no input is available; run "
+                             "svpn-connect.sh from a terminal to enter it.\n")
             return ""
 
 
@@ -115,6 +118,15 @@ class SslVpnSession:
             spa_mod.send_knock(self.opts.host, self.opts.zero_trust)
 
         conn = tls_connect(self.opts.host, self.opts.port, self.opts.tls)
+        # The connection is handed to the AuthState on success; on any failure
+        # below it must be closed here or the fd/TLS state leaks per attempt.
+        try:
+            return self._authenticate(conn)
+        except BaseException:
+            conn.close()
+            raise
+
+    def _authenticate(self, conn: Connection) -> AuthState:
         self._log(f"TLS connected to {self.opts.host}:{self.opts.port}")
 
         # 1) index.cgi + follow redirects, detect version, get gatewayinfo
@@ -304,13 +316,17 @@ class SslVpnSession:
         # The gateway may answer with an HTTP-ish preamble (sometimes carrying
         # the param block as the body) and then raw frames, or raw frames
         # straight away. Strip any preamble, then read the param block frame.
-        leftover, pre_cfg = self._read_tunnel_preamble(tconn)
-        tun = Tunnel(tconn.sock, tun_fd=None, initial_buffer=leftover,
-                     keepalive_max_miss=self.opts.keepalive_max_miss,
-                     log=self._log)
-        cfg = pre_cfg or tun.wait_netconfig(timeout=20.0)
-        if cfg is None or not cfg.is_valid:
-            raise AuthError("did not receive a valid network-config frame")
+        try:
+            leftover, pre_cfg = self._read_tunnel_preamble(tconn)
+            tun = Tunnel(tconn.sock, tun_fd=None, initial_buffer=leftover,
+                         keepalive_max_miss=self.opts.keepalive_max_miss,
+                         log=self._log)
+            cfg = pre_cfg or tun.wait_netconfig(timeout=20.0)
+            if cfg is None or not cfg.is_valid:
+                raise AuthError("did not receive a valid network-config frame")
+        except BaseException:
+            tconn.close()
+            raise
         if cfg.keepalive_time:
             tun.keepalive_interval = max(1.0, float(cfg.keepalive_time))
         self._log(f"tunnel up: ip={cfg.ipaddress} mask={cfg.subnetmask} "
@@ -329,18 +345,30 @@ class SslVpnSession:
         sock = tconn.sock
         buf = bytearray(tconn.take_buffered())
         t0 = time.monotonic()
+
+        def recv_more() -> None:
+            # A closed socket is permanently select()-readable; without the
+            # EOF check below, recv() would return b"" forever and spin the
+            # loop at 100% CPU until the wall-clock deadline (and mask the
+            # disconnect as an empty preamble).
+            nonlocal buf
+            chunk = sock.recv(65536)
+            if not chunk:
+                raise TunnelClosed("tunnel socket closed during preamble")
+            buf += chunk
+
         while not buf and time.monotonic() - t0 < 10:
             r, _, _ = select.select([sock], [], [], 10)
             if not r:
                 break
-            buf += sock.recv(65536)
+            recv_more()
         if bytes(buf[:5]) != b"HTTP/":
             return bytes(buf), None  # raw frame stream
         while b"\r\n\r\n" not in buf and time.monotonic() - t0 < 15:
             r, _, _ = select.select([sock], [], [], 10)
             if not r:
                 break
-            buf += sock.recv(65536)
+            recv_more()
         head, _, rest = bytes(buf).partition(b"\r\n\r\n")
         buf = bytearray(rest)
         cl = _http_content_length(head)
@@ -352,7 +380,7 @@ class SslVpnSession:
                 r, _, _ = select.select([sock], [], [], 10)
                 if not r:
                     break
-                buf += sock.recv(65536)
+                recv_more()
             body, buf = bytes(buf[:cl]), bytearray(buf[cl:])
             if b"IPADDRESS" in body:
                 netcfg = parse_netconfig(body)
@@ -366,6 +394,14 @@ class SslVpnSession:
                 self._log("logged out")
             except Exception as exc:
                 self._log(f"logout request failed (ignored): {exc}")
+            finally:
+                # The control channel has no purpose after logout — close it
+                # here so library users don't leak a fd/TLS state per session.
+                # (Idempotent: Connection.close() is safe to call twice.)
+                try:
+                    self.auth.conn.close()
+                except Exception:
+                    pass
 
 
 def _is_verify_error(result: P.LoginResult) -> bool:

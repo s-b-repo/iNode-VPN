@@ -44,7 +44,7 @@ QString defaultGateway(const QString& iface) {
         bool mok = false;
         int metric = parts.at(6).toInt(&mok);
         if (!mok) continue;         // skip routes with broken metric
-        if (metric > bestMetric) continue;
+        if (metric >= bestMetric && !bestGw.isEmpty()) continue;  // first lowest wins
         bestMetric = metric;
         // Little-endian — byte-reverse to dotted-quad.
         bestGw = QString::asprintf("%u.%u.%u.%u",

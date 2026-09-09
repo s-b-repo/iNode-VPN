@@ -6,7 +6,7 @@ the proprietary H3C *iNode Intelligent Client*, but is a small, readable,
 dependency-light Python implementation you can audit and extend.
 
 The protocol was reverse-engineered from the (unstripped, DWARF-bearing) Linux
-iNode 7.3 client. The full specification lives in **[`docs/PROTOCOL.md`](docs/PROTOCOL.md)**
+iNode 7.3 client. The full specification lives in **[`docs/PROTOCOL.md`](../../docs/PROTOCOL.md)** (repository root)
 — it is implementation-grade (exact CGI paths, XML field order, cookies, frame
 byte-layout, TUN/route/DNS programming, and the Zero-Trust SPA knock).
 
@@ -40,7 +40,7 @@ The client was validated against a faithful **mock gateway**
 (`mock/mock_gateway.py`) and then against a **live** `SSLVPN-Gateway/7.0`, which
 revealed the real capability layout (`/client_getinfo.cgi`, `true/false` flags,
 `<url>` block) — now handled — and a weak CAPTCHA, analysed in
-**[`docs/CAPTCHA.md`](docs/CAPTCHA.md)**. The CAPTCHA is auto-solved by
+**[`docs/CAPTCHA.md`](../../docs/CAPTCHA.md)**. The CAPTCHA is auto-solved by
 `h3csvpn/captcha.py` (stdlib BMP decode + ANSI terminal preview + optional
 `tesseract` OCR); `--auto-captcha` / `--no-auto-captcha` is a persisted toggle.
 
@@ -48,11 +48,15 @@ revealed the real capability layout (`/client_getinfo.cgi`, `true/false` flags,
 
 ## Install
 
-The core client is **pure Python 3.9+ stdlib** — no install needed to try it:
+The core client is **pure Python 3.9+ stdlib** — no install needed to try it.
+It ships inside the iNode VPN Client repository under `backends/`; the GUI
+runs it through a root helper, and `svpn-connect.sh` at the repository root
+wraps it for terminal use:
 
 ```bash
-git clone <this repo> && cd h3c-svpn
-python -m h3csvpn --help
+cd iNode-VPN
+./svpn-connect.sh --auth-only vpn.example.com:443 alice RADIUS   # no root
+PYTHONPATH=backends python3 -m h3csvpn --help                   # the module directly
 ```
 
 Recommended extras (hardened XML, RSA mode, tests):
@@ -70,15 +74,30 @@ DTD/entity guard otherwise).
 ## Usage
 
 ```bash
+export PYTHONPATH=backends   # from the repository root (svpn-connect.sh does this for you)
+
 # Authenticate only (no tunnel, no root needed) — great for a first test:
-python -m h3csvpn vpn.example.com -u alice -d RADIUS --no-tunnel -v
+python3 -m h3csvpn vpn.example.com -u alice -d RADIUS --no-tunnel -v
 
 # Full connection (creates a TUN device; needs root):
-sudo python -m h3csvpn vpn.example.com:443 -u alice -d RADIUS
+sudo -E python3 -m h3csvpn vpn.example.com:443 -u alice -d RADIUS
 
 # Show the exact login request this client would send (no connection):
-python -m h3csvpn vpn.example.com -u alice -p 'pw' --dry-run
+python3 -m h3csvpn vpn.example.com -u alice -p 'pw' --dry-run
 ```
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | clean logout / `--no-tunnel` auth succeeded / `--dry-run` |
+| 2 | usage error, or authentication / TLS / connection failure (`[x] …` line names it) |
+| 3 | login OK but the `NET_EXTEND` tunnel could not be set up |
+| 4 | tunnel needs root (CAP_NET_ADMIN) |
+| 5 | tunnel ran and then failed (connection lost, `ip`/TUN/route/DNS error) |
+| 130 | Ctrl-C before the tunnel was up |
+
+Every `[x]`/`[!]` message, its cause and fix: [`docs/TROUBLESHOOTING.md`](../../docs/TROUBLESHOOTING.md#5-ssl-vpn).
 
 Password sources (in order): `-p/--password`, `$H3C_SVPN_PASSWORD`, interactive prompt.
 
@@ -112,7 +131,7 @@ Get a gateway's pin with:
 ## How it works (module map)
 
 ```
-h3csvpn/
+backends/h3csvpn/
   constants.py   all recovered protocol constants/enums (cited to the binary)
   protocol.py    XML builders/parsers (exact field order; TinyXML-compatible)
   crypto.py      url-encoding, <private> blob, RFC-4226 HOTP, optional RSA
@@ -124,11 +143,13 @@ h3csvpn/
   spa.py         Zero-Trust SPA single-packet-authorization knock (HOTP)
   session.py     end-to-end orchestration (auth -> challenge -> tunnel)
   cli.py         command-line interface
-mock/mock_gateway.py   a fake H3C V7 gateway for offline end-to-end testing
-docs/PROTOCOL.md       the full reverse-engineered protocol specification
+docs/PROTOCOL.md (repository root)   the full reverse-engineered protocol specification
 ```
 
-The connection flow (`docs/PROTOCOL.md` §2): *(optional SPA knock)* → TLS →
+The mock gateway and the pytest suite referred to below live in the upstream
+`h3c-svpn` development tree and are **not** shipped in this repository.
+
+The connection flow (`docs/PROTOCOL.md` §2 at the repository root): *(optional SPA knock)* → TLS →
 `GET /svpn/index.cgi` → parse capabilities/domains → *(CAPTCHA)* →
 `POST request=<urlencoded login XML>` → *(challenge/2FA loop)* → kick-old →
 `NET_EXTEND` on a fresh TLS socket → network-config frame → program TUN/routes/DNS
@@ -138,10 +159,16 @@ The connection flow (`docs/PROTOCOL.md` §2): *(optional SPA knock)* → TLS →
 
 ## Testing
 
+Upstream (not shipped here):
+
 ```bash
 python -m pytest                  # 32 tests: protocol, crypto, framing, e2e mock
 python -m mock.mock_gateway --port 4443 --challenge   # run the mock standalone
 ```
+
+In this repository the quick checks are `python3 -m compileall backends/h3csvpn`,
+`PYTHONPATH=backends python3 -m h3csvpn --help`, and an `--auth-only` run
+against your gateway.
 
 The end-to-end tests stand up the mock gateway over TLS and drive the real
 client through auth (incl. CAPTCHA and SMS challenge), the `NET_EXTEND` tunnel,

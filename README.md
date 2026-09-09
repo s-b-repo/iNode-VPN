@@ -32,17 +32,30 @@ run, is 100% FOSS (GPL-3.0 + MIT), and contains no vendor code.
 system-wide, registers polkit, then runs an environment self-check):
 
 ```bash
+git clone https://github.com/s-b-repo/iNode-VPN.git
+cd iNode-VPN
 ./deploy.sh
 ```
 
 ```bash
 ./deploy.sh --local       # portable build in ./bin — no root, run ./iNode-VPN.sh
-./deploy.sh --uninstall   # remove the system install
+./deploy.sh --update      # pull the latest sources, rebuild, reinstall
+./deploy.sh --uninstall   # remove the system install (keeps ~/.config)
 ./deploy.sh --doctor      # environment report only
 ```
 
-Full guide with per-distro packages, manual build steps, GPG keyring setup,
-and troubleshooting: **[docs/INSTALL.md](docs/INSTALL.md)**.
+Works headless too (SSH, containers): `--doctor`/`--version` never need a
+display. Full guide with per-distro packages, manual build steps, and
+troubleshooting: **[docs/INSTALL.md](docs/INSTALL.md)**.
+
+## Update
+
+```bash
+./deploy.sh --update
+```
+
+Pulls `main`, rebuilds, and reinstalls in whichever mode you used before
+(system or portable). Profiles and saved passwords are untouched.
 
 ## Use
 
@@ -50,9 +63,11 @@ and troubleshooting: **[docs/INSTALL.md](docs/INSTALL.md)**.
 
 ```bash
 ./iNode-VPN.sh                     # portable tree
-iNodeClient-Qt                     # system install
-iNodeClient-Qt --connect "Office"  # auto-connect a profile
-iNodeClient-Qt --list-profiles     # CLI control: also --status / --disconnect
+iNodeClient-Qt                     # system install (a 2nd launch raises the 1st)
+iNodeClient-Qt --connect "Office"  # connect a profile (forwarded if already running)
+iNodeClient-Qt --status            # state of the running instance (exit 0/2/3)
+iNodeClient-Qt --disconnect        # tear the session down from any terminal
+iNodeClient-Qt --list-profiles     # names for --connect
 ```
 
 Add a profile → pick a protocol → fill gateway/username/domain → for
@@ -77,9 +92,12 @@ Ctrl-C tears the tunnel down cleanly. More recipes:
 iNodeClient-Qt --doctor
 ```
 
-Reports Qt/KF6 build, all four credential backends, external tools, privileged
+Reports Qt/KF6 build, the credential backends, external tools, privileged
 helpers + polkit registration, and the Python backend module — with `[ok]` /
 `[MISSING]` per item and the **active** credential backend called out.
+
+Something not working? **[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)**
+lists every message the client can produce with its fix.
 
 ## Credential storage (at rest)
 
@@ -88,15 +106,11 @@ order; the active one is shown by `--doctor`:
 
 1. **KWallet** (KF6 build) — unlocked by your login session
 2. **Secret Service** — gnome-keyring / KeePassXC / ksecretd
-3. **system GnuPG** — sealed to *your* GPG key (or symmetric via pinentry if
-   you have none); gpg-agent owns the passphrase, this app never sees it
-4. **AES-256-GCM file** — master-password fallback (PBKDF2 200k, 0600 file)
+3. **AES-256-GCM file** — master-password fallback (PBKDF2 200k, 0600 file)
 
-```bash
-gpg --full-gen-key        # optional — enables the GPG backend
-```
-
-See **[docs/INSTALL.md → Credential storage](docs/INSTALL.md#4-credential-storage-gpg-and-friends)**.
+The legacy **system GnuPG** backend was removed in v0.3; an existing
+`secrets.gpg` is transparently re-sealed into the active backend on first use
+(gpg-agent handles the passphrase during that one-time decrypt).
 
 ## Security
 
@@ -116,8 +130,9 @@ See **[docs/INSTALL.md → Credential storage](docs/INSTALL.md#4-credential-stor
 
 | Document | Contents |
 |---|---|
-| [docs/INSTALL.md](docs/INSTALL.md) | Install (3 methods), per-distro deps, GPG setup, troubleshooting |
-| [docs/USAGE.md](docs/USAGE.md) | Daily use: GUI + CLI, profiles, pins, CAPTCHA, troubleshooting |
+| [docs/INSTALL.md](docs/INSTALL.md) | Install (3 methods), updating, per-distro deps, credential storage |
+| [docs/USAGE.md](docs/USAGE.md) | Daily use: GUI + CLI, profiles, pins, CAPTCHA, control commands |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | **Every error message the client can show, its cause and the fix** — install, launch, credentials, polkit, SSL VPN, CAPTCHA, tunnel/DNS, 802.1X/WLAN, L2TP, Portal/EAD/SDP, update |
 | [docs/PROTOCOL.md](docs/PROTOCOL.md) | Full reverse-engineered SSL VPN wire spec |
 | [docs/PROTOCOLS.md](docs/PROTOCOLS.md) | Implementation status per protocol plugin |
 | [docs/SECURITY-FINDINGS.md](docs/SECURITY-FINDINGS.md) | Security audit (vendor protocol flaws + client fixes) |
@@ -141,10 +156,11 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build -j$(nproc)     # -j2 if RAM is tight
 ```
 
-Sanity checks:
+Sanity checks (all work without a display):
 
 ```bash
 ./bin/iNodeClient-Qt --doctor                        # environment report
+./bin/iNodeClient-Qt --version                       # prints 0.3.0
 PYTHONPATH=backends python3 -m h3csvpn --help        # backend module loads
 ./svpn-connect.sh --auth-only <gw>:<port> <user> <domain>   # auth-only test
 ```

@@ -45,8 +45,18 @@ jobs:
       - name: Build
         run: cmake --build build -j$(nproc)
 
-      - name: Smoke test (version)
-        run: QT_QPA_PLATFORM=offscreen ./build/iNodeClient-Qt --version
+      - name: Smoke test (headless --version / --doctor)
+        run: |
+          ./build/iNodeClient-Qt --version
+          ./build/iNodeClient-Qt --doctor
+
+      - name: Staged install (validates CMake install rules)
+        run: DESTDIR="$PWD/stage" cmake --install build --prefix /usr/local && find stage -type f | sort
+
+      - name: Shell + Python syntax
+        run: |
+          bash -n deploy.sh iNode-VPN.sh svpn-connect.sh scripts/*
+          python3 -m compileall -q backends/h3csvpn
 
       - name: Check binary
         run: file build/iNodeClient-Qt && ldd build/iNodeClient-Qt

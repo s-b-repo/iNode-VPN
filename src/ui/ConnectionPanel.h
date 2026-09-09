@@ -10,6 +10,7 @@
 
 class QLabel;
 class QProgressBar;
+class QTimer;
 
 namespace inode {
 
@@ -52,6 +53,7 @@ private:
     QLabel*       m_rate       = nullptr;
     QProgressBar* m_progress   = nullptr;    // indeterminate while connecting
     Sparkline*    m_spark      = nullptr;
+    QTimer*       m_uptimeTimer = nullptr;   // ticks only while connected
 
     ConnectionState m_state = ConnectionState::Disconnected;
     QDateTime       m_connectedAt;

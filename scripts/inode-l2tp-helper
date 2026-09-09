@@ -17,6 +17,7 @@
 #   - Returns 0 on success, non-zero on failure.
 
 set -euo pipefail
+set -E   # let ERR traps fire inside functions/subshells too
 
 die() { echo "helper: $*" >&2; exit 1; }
 
@@ -95,10 +96,38 @@ PPP_PEER=/etc/ppp/peers/${NAME}
 
 mkdir -p /etc/ipsec.conf.d /etc/xl2tpd/xl2tpd.conf.d
 
+# Field-exact chap-secrets entry removal. awk with the username passed via -v
+# compares fields literally — building a grep pattern from $USERNAME would
+# compile it as an ERE, so a username of ".*" would match (and DELETE) every
+# whitespace-delimited line in the file, i.e. all other users' entries.
+# Comments and blank lines are preserved verbatim.
+remove_chap_entry() {
+    local user=$1
+    [[ -f $PPP_CHAP ]] || return 0
+    awk -v u="$user" 'NF == 0 || $1 ~ /^#/ || $1 != u' "$PPP_CHAP" \
+        > "${PPP_CHAP}.tmp" \
+        && cat "${PPP_CHAP}.tmp" > "$PPP_CHAP"
+    rm -f "${PPP_CHAP}.tmp"
+}
+
 case "$cmd" in
     up)
         [[ -n $SERVER && -n $PSK && -n $USERNAME && -n $PASSWORD ]] \
             || die "up requires --server --psk --username --password"
+
+        # Rollback: if any step below fails, remove every file we wrote and
+        # tear the tunnel back down, so root-owned secrets/configs never
+        # linger after a failed bring-up. The ROLLBACK flag disables the
+        # trap once everything succeeded.
+        ROLLBACK=1
+        rollback() {
+            (( ROLLBACK )) || return 0
+            rm -f "$IPSEC_FRAG" "$IPSEC_SECRETS" "$XL2TPD_FRAG" "$PPP_PEER"
+            echo "d ${NAME}" > /var/run/xl2tpd/l2tp-control 2>/dev/null || true
+            ipsec down "${NAME}" >/dev/null 2>&1 || true
+            ipsec reload >/dev/null 2>&1 || true
+        }
+        trap rollback EXIT
 
         # Force-UDP-encap forces the IKE endpoint to advertise NAT-T regardless
         # of whether a NAT is present. Needed against some H3C concentrators
@@ -156,13 +185,10 @@ name ${USERNAME}
 EOF
         chmod 600 "$PPP_PEER"
 
-        # Merge into chap-secrets without duplicating.
-        # Use grep -v instead of sed to avoid regex injection via $USERNAME.
+        # Merge into chap-secrets without duplicating (field-exact, see
+        # remove_chap_entry above).
         touch "$PPP_CHAP"; chmod 600 "$PPP_CHAP"
-        if grep -q "^${USERNAME}[[:space:]]" "$PPP_CHAP" 2>/dev/null; then
-            grep -v "^${USERNAME}[[:space:]]" "$PPP_CHAP" > "${PPP_CHAP}.tmp" && \
-                mv "${PPP_CHAP}.tmp" "$PPP_CHAP"
-        fi
+        remove_chap_entry "$USERNAME"
         printf '%s\t*\t%s\t*\n' "$USERNAME" "$PASSWORD" >> "$PPP_CHAP"
 
         # Include our fragment from the main ipsec.conf if not already.
@@ -190,6 +216,9 @@ EOF
         else
             die "ppp0 did not come up"
         fi
+
+        ROLLBACK=0
+        trap - EXIT
         ;;
 
     down)
@@ -198,6 +227,11 @@ EOF
         fi
         ipsec down "${NAME}" >/dev/null 2>&1 || true
         rm -f "$IPSEC_FRAG" "$IPSEC_SECRETS" "$XL2TPD_FRAG" "$PPP_PEER"
+        # The chap-secrets entry is keyed by username; remove it when the
+        # caller supplied --username (the GUI knows it).
+        if [[ -n $USERNAME ]]; then
+            remove_chap_entry "$USERNAME"
+        fi
         ipsec reload >/dev/null 2>&1 || true
         echo "L2TP tunnel ${NAME} torn down"
         ;;

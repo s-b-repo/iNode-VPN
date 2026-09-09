@@ -1,8 +1,8 @@
 #include "MainWindow.h"
 #include "core/ConnectionStats.h"
+#include "core/ControlChannel.h"
 #include "core/CredentialStore.h"
 #include "core/EncryptedFileStore.h"
-#include "core/GpgFileStore.h"
 #include "core/Logger.h"
 #include "core/Protocol.h"
 #include "core/ProfileStore.h"
@@ -65,11 +65,17 @@ int runDoctor(QTextStream& out) {
     line(ok(false), QStringLiteral("KWallet (build without KF6)"));
 #endif
     line(ok(inode::secretservice::available()), QStringLiteral("freedesktop Secret Service"));
-    line(ok(inode::gpgstore::available()), QStringLiteral("GnuPG — %1")
-             .arg(inode::gpgstore::available() ? inode::gpgstore::description()
-                                               : QStringLiteral("gpg binary not found")));
     line(ok(inode::encfilestore::haveCrypto()), QStringLiteral("AES-256-GCM file (libcrypto via dlopen)"));
     out << "  active: " << inode::CredentialStore::instance().backendDescription() << '\n';
+    // The system-GnuPG backend was removed in v0.3; a leftover store is
+    // migrated transparently on first use.
+    const QString legacyGpg =
+        QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation)
+        + QStringLiteral("/secrets.gpg");
+    if (QFileInfo::exists(legacyGpg)) {
+        out << "  note: legacy GPG credential store found ("
+            << legacyGpg << ") — migrated to the active backend on first use\n";
+    }
 
     out << "\nExternal tools:\n";
     line(ok(!which("python3").isEmpty()), QStringLiteral("python3 (SSL VPN backend runtime)"));
@@ -92,12 +98,22 @@ int runDoctor(QTextStream& out) {
         const bool found = QFileInfo::exists(installed) || QFileInfo::exists(local);
         line(ok(found), QStringLiteral("%1").arg(QLatin1String(helper)));
     }
-    // polkit reads actions from /usr/share and /usr/local/share — a /usr/local
-    // install (deploy.sh default PREFIX) lands in the latter.
-    const bool policyFound =
-        QFileInfo::exists(QStringLiteral("/usr/share/polkit-1/actions/org.inode.ClientQt.policy"))
-        || QFileInfo::exists(QStringLiteral("/usr/local/share/polkit-1/actions/org.inode.ClientQt.policy"));
-    line(ok(policyFound), QStringLiteral("polkit action org.inode.ClientQt.*"));
+    // polkit only scans /usr/share/polkit-1/actions (its compile-time datadir).
+    // A PREFIX=/usr/local install puts the file under /usr/local/share, which
+    // polkit never reads — deploy.sh mirrors it; warn if that didn't happen.
+    const bool policyCanonical =
+        QFileInfo::exists(QStringLiteral("/usr/share/polkit-1/actions/org.inode.ClientQt.policy"));
+    const bool policyPrefixOnly = !policyCanonical &&
+        QFileInfo::exists(QStringLiteral("/usr/local/share/polkit-1/actions/org.inode.ClientQt.policy"));
+    line(ok(policyCanonical), QStringLiteral("polkit action org.inode.ClientQt.* "
+                                             "(/usr/share/polkit-1/actions)"));
+    if (policyPrefixOnly) {
+        out << "  note: policy only found under /usr/local/share — polkit will not see it;\n"
+               "        run ./deploy.sh (it mirrors the file into /usr/share/polkit-1/actions)\n";
+    } else if (!policyCanonical) {
+        out << "  note: not installed system-wide — pkexec will still prompt, just without\n"
+               "        the per-action descriptions (./deploy.sh registers the policy)\n";
+    }
 
     out << "\nSSL VPN backend module:\n";
     {
@@ -114,11 +130,39 @@ int runDoctor(QTextStream& out) {
 
 } // namespace
 
+// Text-only entry points (--doctor, --version, --help, --list-profiles) must
+// work on a headless box / over SSH / from deploy.sh in a TTY. QApplication
+// aborts when no platform plugin can start, so when no display is reachable
+// and the caller only asked for text output, fall back to the offscreen QPA.
+static void selectHeadlessPlatformIfNeeded(int argc, char** argv) {
+    if (qEnvironmentVariableIsSet("QT_QPA_PLATFORM")) return;
+    bool textOnly = false;
+    for (int i = 1; i < argc; ++i) {
+        const QByteArray a(argv[i]);
+        if (a == "--doctor" || a == "--version" || a == "-v"
+                || a == "--help" || a == "-h" || a == "--list-profiles"
+                || a == "--status" || a == "--disconnect") {
+            textOnly = true;
+            break;
+        }
+    }
+    if (!textOnly) return;
+    if (qEnvironmentVariableIsEmpty("DISPLAY")
+            && qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY")) {
+        qputenv("QT_QPA_PLATFORM", QByteArrayLiteral("offscreen"));
+    }
+}
+
+#ifndef INODE_VERSION
+#define INODE_VERSION "0.3.0"
+#endif
+
 int main(int argc, char** argv) {
+    selectHeadlessPlatformIfNeeded(argc, argv);
     QApplication app(argc, argv);
     QApplication::setOrganizationName(QStringLiteral("iNodeClient-Qt"));
     QApplication::setApplicationName(QStringLiteral("iNodeClient-Qt"));
-    QApplication::setApplicationVersion(QStringLiteral("0.2.0"));
+    QApplication::setApplicationVersion(QStringLiteral(INODE_VERSION));
     QApplication::setApplicationDisplayName(QStringLiteral("iNode Client (Qt)"));
     // Only stay alive on window close when we actually have somewhere to go
     // (i.e. a usable system tray). Otherwise closing the window means quit.
@@ -211,12 +255,49 @@ int main(int argc, char** argv) {
     ProfileStore store;
     store.load();
 
-    // --list-profiles / --status short-circuit the UI
+    // --list-profiles / --status / --disconnect short-circuit the UI.
     if (parser.isSet(optList)) {
         QTextStream out(stdout);
         for (const auto& p : store.profiles())
             out << p.name << '\t' << inode::protocolName(p.kind) << '\n';
         return 0;
+    }
+    // Talk to the instance that is already running (if any) over the local
+    // control socket instead of starting a second GUI.
+    //   --status      exit 0 connected, 2 running but not connected, 3 not running
+    //   --disconnect  exit 0 sent, 3 not running
+    //   --connect     forwarded when an instance runs; otherwise starts the GUI
+    //   (no flags)    raises the running window instead of opening a second one
+    if (parser.isSet(optStatus)) {
+        QTextStream out(stdout);
+        QString reply;
+        if (!inode::sendControlCommand(QStringLiteral("status"), &reply)) {
+            out << "not running\n";
+            return 3;
+        }
+        out << reply << '\n';
+        return reply.startsWith(QLatin1String("connected")) ? 0 : 2;
+    }
+    if (parser.isSet(optDisconnect)) {
+        QTextStream out(stdout);
+        QString reply;
+        if (!inode::sendControlCommand(QStringLiteral("disconnect"), &reply)) {
+            out << "not running — nothing to disconnect\n";
+            return 3;
+        }
+        out << reply << '\n';
+        return 0;
+    }
+    {
+        QString reply;
+        const QString cmd = parser.isSet(optConnect)
+            ? QStringLiteral("connect ") + parser.value(optConnect)
+            : QStringLiteral("show");
+        if (inode::sendControlCommand(cmd, &reply)) {
+            QTextStream out(stdout);
+            out << reply << '\n';
+            return reply.startsWith(QLatin1String("error")) ? 1 : 0;
+        }
     }
 
     MainWindow w(&store);
@@ -232,8 +313,6 @@ int main(int argc, char** argv) {
         } else {
             QTimer::singleShot(0, &w, [&w, p] { w.connectByProfile(*p); });
         }
-    } else if (parser.isSet(optDisconnect)) {
-        QTimer::singleShot(0, &w, [&w] { w.disconnectActive(); QCoreApplication::quit(); });
     } else if (const auto* p = store.autoConnectProfile()) {
         QTimer::singleShot(0, &w, [&w, p] { w.connectByProfile(*p); });
     }

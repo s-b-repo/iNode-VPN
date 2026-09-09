@@ -27,8 +27,10 @@ SslVpnProtocol::~SslVpnProtocol() {
         // Don't let a queued finished()/readyRead() reach a half-destroyed obj.
         QObject::disconnect(m_proc, nullptr, this, nullptr);
         if (m_proc->state() != QProcess::NotRunning) {
-            requestStop();              // graceful logout + TUN teardown
-            m_proc->waitForFinished(8000);
+            // Fire-and-forget the graceful logout (the helper SIGINTs the
+            // root backend) instead of blocking shutdown for up to 20 s.
+            requestStopDetached();
+            m_proc->waitForFinished(2000);
             if (m_proc->state() != QProcess::NotRunning) m_proc->kill();
         }
     }
@@ -171,15 +173,16 @@ void SslVpnProtocol::connectWith(const Profile& profile) {
         py << QStringLiteral("--ead");
 
     // Zero-Trust / SDP single-packet-authorization knock before connecting.
-    // The SPA key is sensitive and must not appear in argv/ps.
+    // The SPA key is sensitive and must not appear in argv/ps, so it travels
+    // in the environment (applied to m_proc once created below).
+    QProcessEnvironment procEnv;
     if (!profile.sslvpnSpaKey.isEmpty()) {
-        QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-        env.insert(QStringLiteral("H3C_SPA_KEY"), profile.sslvpnSpaKey);
+        procEnv = QProcessEnvironment::systemEnvironment();
+        procEnv.insert(QStringLiteral("H3C_SPA_KEY"), profile.sslvpnSpaKey);
         if (!profile.sslvpnSpaAid.isEmpty())
-            env.insert(QStringLiteral("H3C_SPA_AID"), profile.sslvpnSpaAid);
+            procEnv.insert(QStringLiteral("H3C_SPA_AID"), profile.sslvpnSpaAid);
         if (!profile.sslvpnSpaPorts.isEmpty())
-            env.insert(QStringLiteral("H3C_SPA_PORTS"), profile.sslvpnSpaPorts);
-        m_proc->setProcessEnvironment(env);
+            procEnv.insert(QStringLiteral("H3C_SPA_PORTS"), profile.sslvpnSpaPorts);
     }
 
     // CAPTCHA: the gateways that use one ship a weak (but noisy) image; the
@@ -215,8 +218,15 @@ void SslVpnProtocol::connectWith(const Profile& profile) {
     Logger::instance().info(
         tr("SSL VPN: connecting to %1 as %2").arg(gateway, profile.username));
 
-    if (m_proc) { m_proc->deleteLater(); m_proc = nullptr; }
+    if (m_proc) {
+        QObject::disconnect(m_proc, nullptr, this, nullptr);
+        if (m_proc->state() != QProcess::NotRunning) m_proc->kill();
+        m_proc->deleteLater();
+        m_proc = nullptr;
+    }
     m_proc = new QProcess(this);
+    if (!procEnv.isEmpty())
+        m_proc->setProcessEnvironment(procEnv);
     m_proc->setProcessChannelMode(QProcess::MergedChannels);
     connect(m_proc, &QProcess::readyRead, this, &SslVpnProtocol::onReadyRead);
     connect(m_proc, &QProcess::finished, this, &SslVpnProtocol::onFinished);
@@ -230,14 +240,11 @@ void SslVpnProtocol::connectWith(const Profile& profile) {
 
     setState(ConnectionState::Connecting);
     m_proc->start(launcher, full);
-    if (!m_proc->waitForStarted(8000)) {
-        emit errorOccurred(tr("SSL VPN helper did not start."));
-        m_password.clear();
-        setState(ConnectionState::Failed);
-        return;
-    }
 
     // Stream the password to the helper's stdin so it never lands in argv/ps.
+    // QProcess buffers writes made before the process is up and flushes them
+    // on start; a FailedToStart is reported via errorOccurred above, so no
+    // blocking waitForStarted() is needed here.
     m_proc->write(m_password.toUtf8());
     m_proc->write("\n");
     m_proc->closeWriteChannel();
@@ -322,6 +329,8 @@ void SslVpnProtocol::onFinished(int exitCode, int /*exitStatus*/) {
                                   "(check username, password, domain and gateway)"); break;
             case 3:   reason = tr("tunnel setup failed after a successful login"); break;
             case 4:   reason = tr("the tunnel needs root privileges"); break;
+            case 5:   reason = tr("connection lost (gateway closed the tunnel "
+                                   "or no heartbeat response)"); break;
             case 126:
             case 127: reason = tr("could not gain privileges "
                                   "(pkexec/sudo denied or no polkit agent running)"); break;
@@ -332,22 +341,14 @@ void SslVpnProtocol::onFinished(int exitCode, int /*exitStatus*/) {
     setState(ConnectionState::Failed);
 }
 
-void SslVpnProtocol::requestStop() {
+void SslVpnProtocol::requestStopDetached() {
     if (m_connName.isEmpty()) return;
     QStringList helperArgs;
     helperArgs << QStringLiteral("stop") << QStringLiteral("--name") << m_connName;
     QString launcher;
     QStringList full;
     if (!buildHelperInvocation(helperArgs, &launcher, &full)) return;
-
-    QProcess stop;
-    stop.setProcessChannelMode(QProcess::MergedChannels);
-    stop.start(launcher, full);
-    if (!stop.waitForStarted(5000)) return;
-    stop.waitForFinished(15000);
-    const QByteArray out = stop.readAll();
-    for (const auto& ln : out.split('\n'))
-        if (!ln.trimmed().isEmpty()) emit logLine(QString::fromUtf8(ln));
+    QProcess::startDetached(launcher, full);
 }
 
 void SslVpnProtocol::disconnect() {
@@ -356,19 +357,37 @@ void SslVpnProtocol::disconnect() {
     setState(ConnectionState::Disconnecting);
     m_statsTimer->stop();
 
-    // SIGINT the (root) backend via the helper so it logs out + tears down TUN.
-    // We can't signal the privileged process from the GUI directly.
-    requestStop();
+    // SIGINT the (root) backend via the helper so it logs out + tears down
+    // TUN. We can't signal the privileged process from the GUI directly, and
+    // we must not block the GUI waiting for the backend's logout — its
+    // finished() handler reports Disconnected when it is really gone. A
+    // safety timer escalates to kill if the backend ignores the SIGINT.
+    requestStopDetached();
+    m_connName.clear();
 
     if (m_proc && m_proc->state() != QProcess::NotRunning) {
-        if (!m_proc->waitForFinished(8000)) {
-            m_proc->kill();                 // best effort
-            m_proc->waitForFinished(2000);
-        }
+        // Guard is bound to THIS process object: if the user reconnects
+        // during the disconnect window, connectWith() replaces m_proc and
+        // the stale guard must not kill the new backend.
+        auto* proc = m_proc;
+        auto* guard = new QTimer(this);
+        guard->setSingleShot(true);
+        connect(guard, &QTimer::timeout, this, [this, proc, guard] {
+            guard->deleteLater();
+            if (m_proc == proc && proc->state() != QProcess::NotRunning) {
+                proc->kill();       // backend ignored the SIGINT — force it
+                // Escalation may still take a moment; don't wait on the GUI.
+                QTimer::singleShot(2000, this, [this, proc] {
+                    if (m_proc == proc && proc->state() != QProcess::NotRunning)
+                        setState(ConnectionState::Disconnected);
+                });
+            }
+        });
+        guard->start(5000);
     } else {
         setState(ConnectionState::Disconnected);
+        m_connName.clear();
     }
-    m_connName.clear();
 }
 
 } // namespace inode

@@ -42,14 +42,17 @@ def build_knock(cfg: SpaConfig, pkt_id: int | None = None) -> bytes:
     # digits=5 + RFC4226 Luhn checksum -> 6 chars filling the password[6] field.
     pw = hotp_bytes(cfg.client_key, pkt_id, nbytes=6, digits=cfg.digits,
                     add_checksum=True)
-    nports = len(cfg.ports)
-    port_count = (nports // 2) + 1
+    # A degenerate/empty port list would emit portCount=1 with zero port
+    # words; out-of-range ports would raise struct.error mid-send.
+    ports = tuple(p for p in (cfg.ports or ()) if 0 < p <= 65535)
+    ports = ports or (C.SPA_AUTH_PORT,)
+    port_count = (len(ports) // 2) + 1
     pkt = struct.pack(">H", C.SPA_DECLARED_LEN)
     pkt += aid
     pkt += struct.pack(">I", pkt_id)
     pkt += pw
     pkt += struct.pack(">B", port_count)
-    for p in cfg.ports:
+    for p in ports:
         pkt += struct.pack(">H", p)
     return pkt
 

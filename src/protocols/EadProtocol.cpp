@@ -106,21 +106,40 @@ QByteArray EadProtocol::buildPostureXml() const {
     return xml.toUtf8();
 }
 
-void EadProtocol::transmit(const QByteArray& pkt) {
-    m_lastPkt = pkt;
-    const auto addrs = QHostInfo::fromName(m_host).addresses();
-    QHostAddress addr;
-    if (!addrs.isEmpty()) {
-        addr = addrs.first();
-    } else {
-        addr = QHostAddress(m_host);
-        if (addr.isNull()) {
-            emit logLine(tr("EAD: DNS resolution failed for %1").arg(m_host));
+void EadProtocol::resolveServer(std::function<void()> then) {
+    if (!m_addr.isNull()) { if (then) then(); return; }
+    if (m_resolving) return;   // a lookup is already in flight
+    m_resolving = true;
+    QHostInfo::lookupHost(m_host, this, [this, then = std::move(then)](const QHostInfo& info) {
+        m_resolving = false;
+        if (!info.addresses().isEmpty()) {
+            m_addr = info.addresses().first();
+            if (then) then();
             return;
         }
-    }
-    m_sock->writeDatagram(pkt, addr, m_port);
+        // Literal IP (no DNS involved) still works.
+        QHostAddress literal(m_host);
+        if (!literal.isNull()) {
+            m_addr = literal;
+            if (then) then();
+            return;
+        }
+        // DNS failed: fail cleanly instead of hanging in Authenticating.
+        emit logLine(tr("EAD: DNS resolution failed for %1").arg(m_host));
+        emit errorOccurred(tr("EAD: DNS resolution failed for %1").arg(m_host));
+        setState(ConnectionState::Failed);
+        if (m_sock) m_sock->close();
+    });
+}
+
+void EadProtocol::transmit(const QByteArray& pkt) {
+    m_lastPkt = pkt;
+    // Always arm the retransmit timer — it also drives the flow while DNS
+    // resolution is still in flight, so a slow resolver cannot wedge the
+    // protocol in Authenticating.
     if (m_retry) m_retry->start();
+    if (m_addr.isNull()) return;   // resolveServer() will unblock the flow
+    m_sock->writeDatagram(pkt, m_addr, m_port);
 }
 
 void EadProtocol::connectWith(const Profile& profile) {
@@ -165,7 +184,8 @@ void EadProtocol::connectWith(const Profile& profile) {
     connect(m_retry, &QTimer::timeout, this, &EadProtocol::onRetry);
 
     setState(ConnectionState::Connecting);
-    sendStart();
+    // Async DNS: sendStart() runs once the server address is known.
+    resolveServer([this] { sendStart(); });
 }
 
 void EadProtocol::sendStart() {
@@ -189,10 +209,9 @@ void EadProtocol::sendHeartbeat() {
 }
 
 void EadProtocol::sendOffline() {
-    if (!m_sock) return;
+    if (!m_sock || m_addr.isNull()) return;
     // Fire-and-forget; we tear down regardless of the response.
-    const auto addr = QHostInfo::fromName(m_host).addresses().value(0, QHostAddress(m_host));
-    m_sock->writeDatagram(buildPacket(SEC_OFFLINE, QByteArray()), addr, m_port);
+    m_sock->writeDatagram(buildPacket(SEC_OFFLINE, QByteArray()), m_addr, m_port);
     Logger::instance().info(QStringLiteral("EAD: SEC_OFFLINE sent"));
 }
 

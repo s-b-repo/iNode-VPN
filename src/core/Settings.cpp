@@ -1,5 +1,6 @@
 #include "Settings.h"
 
+#include <QDebug>
 #include <QDir>
 #include <QFile>
 #include <QSettings>
@@ -54,7 +55,11 @@ void Settings::setAutostart(bool b) {
     const QString path = autostartDesktopPath();
     if (!b) { QFile::remove(path); return; }
     QFile f(path);
-    if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) return;
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        qWarning("iNode: cannot write autostart entry %s: %s",
+                 qUtf8Printable(path), qUtf8Printable(f.errorString()));
+        return;
+    }
     QTextStream ts(&f);
     ts << "[Desktop Entry]\n"
        << "Type=Application\n"
